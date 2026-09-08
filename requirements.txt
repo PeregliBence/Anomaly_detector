@@ -1,0 +1,22 @@
+streamlit
+numpy
+pandas
+scikit-learn
+tensorflow==2.20.0
+yfinance
+altair
+streamlit-searchbox
+plotly
+python-dotenv
+statsmodels
+xgboost
+lightgbm
+# Advanced forecasting
+arch>=7.0
+fredapi
+river
+shap
+google-generativeai>=0.8.0
+# Optional (heavy deps — uncomment if needed)
+# pytorch-forecasting
+# lightning

@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Virtual environments
+.venv/
+python_env/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Windows artifact from a stray shell redirect
+NUL
+
+# Generated research output
+results/
+logs/
+data/cache/
+*.db
+
+# OS
+Thumbs.db
+.DS_Store

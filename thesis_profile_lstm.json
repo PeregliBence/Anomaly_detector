@@ -1,0 +1,23 @@
+{
+  "tickers": "AAPL,MSFT,NVDA,^GSPC",
+  "start": "2020-01-01",
+  "end": null,
+  "horizon": 5,
+  "semester_end": "2026-12-31",
+  "focus": "forecast-only",
+  "min_confidence": 0.60,
+  "fee_bps": 2.0,
+  "slippage_bps": 3.0,
+  "benchmark_seed": 42,
+  "selection_min_trades": 15,
+  "selection_min_sharpe": 0.2,
+  "selection_max_drawdown_pct": 35.0,
+  "selection_min_diracc": 0.5,
+  "model_sets": [
+    ["xgboost"],
+    ["arima", "xgboost", "lstm"],
+    ["lstm"]
+  ],
+  "out_dir": "results/thesis_lstm",
+  "run_tag": "lstm-track"
+}
