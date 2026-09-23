@@ -8,7 +8,9 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    # override=True so a later line wins over an earlier duplicate of the same
+    # key, and over a stale value already in the shell environment.
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 except ImportError:
     pass
 
