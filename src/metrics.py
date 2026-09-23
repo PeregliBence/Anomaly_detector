@@ -1,8 +1,14 @@
-"""Scoring and significance testing for directional predictions.
+"""Scoring for panel predictions.
 
-A raw accuracy number means little on its own: equities drift upward, so
-"always up" already scores above 50%. Every accuracy here is therefore paired
-with a confidence interval and a test against the relevant null.
+The headline number for a cross-sectional model is the information
+coefficient: the rank correlation, computed within each date, between the
+score and the return that followed. Its mean over dates is the edge, and its
+t-statistic says whether that edge is distinguishable from zero.
+
+That t-statistic needs care. Predicting daily on an h-day horizon makes
+consecutive windows overlap, so consecutive ICs are autocorrelated and the
+ordinary standard error understates the noise. The Newey-West correction below
+widens it to account for the overlap.
 """
 
 from __future__ import annotations
@@ -11,6 +17,101 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+
+# ---------------------------------------------------------------------------
+# Cross-sectional
+# ---------------------------------------------------------------------------
+
+def rank_ic(preds: pd.DataFrame, min_names: int = 20) -> pd.Series:
+    """Per-date Spearman correlation between score and realised return."""
+    usable = preds.dropna(subset=["score", "fwd_return"])
+
+    def one_date(group: pd.DataFrame) -> float:
+        if len(group) < min_names or group["score"].nunique() < 2:
+            return np.nan
+        return stats.spearmanr(group["score"], group["fwd_return"]).statistic
+
+    return usable.groupby(level="date").apply(one_date).dropna()
+
+
+def newey_west_tstat(series: pd.Series, lags: int) -> tuple[float, float]:
+    """t-statistic for the mean of an autocorrelated series.
+
+    Returns (t_stat, standard_error). `lags` should be the horizon minus one:
+    that is how far the overlap between prediction windows reaches.
+    """
+    x = series.dropna().values
+    n = len(x)
+    if n < 10:
+        return (float("nan"), float("nan"))
+
+    centred = x - x.mean()
+    variance = float(centred @ centred) / n
+
+    for lag in range(1, min(lags, n - 1) + 1):
+        cov = float(centred[lag:] @ centred[:-lag]) / n
+        variance += 2 * (1 - lag / (lags + 1)) * cov
+
+    variance = max(variance, 1e-12)
+    se = np.sqrt(variance / n)
+    return (float(x.mean() / se), float(se))
+
+
+def ic_summary(preds: pd.DataFrame, horizon: int, min_names: int = 20) -> dict:
+    """Mean IC with overlap-corrected significance."""
+    ic = rank_ic(preds, min_names=min_names)
+    if ic.empty:
+        return {"n_dates": 0}
+
+    t_stat, se = newey_west_tstat(ic, lags=max(horizon - 1, 1))
+    mean = float(ic.mean())
+    std = float(ic.std())
+
+    return {
+        "n_dates": len(ic),
+        "ic_mean": mean,
+        "ic_std": std,
+        # Information ratio: edge per unit of its own variability.
+        "ic_ir": mean / std if std > 0 else float("nan"),
+        "ic_tstat": t_stat,
+        "ic_se": se,
+        "ic_pvalue": float(2 * (1 - stats.norm.cdf(abs(t_stat)))) if np.isfinite(t_stat) else float("nan"),
+        "ic_positive_rate": float((ic > 0).mean()),
+    }
+
+
+def decile_spread(preds: pd.DataFrame, n_buckets: int = 10, min_names: int = 20) -> dict:
+    """Return of a long-top / short-bottom bucket portfolio.
+
+    Translates the rank correlation into the quantity the result would
+    actually be judged on: what the ordering was worth.
+    """
+    usable = preds.dropna(subset=["score", "fwd_return"])
+    rows = []
+
+    for date, group in usable.groupby(level="date"):
+        if len(group) < max(min_names, n_buckets * 2):
+            continue
+        buckets = pd.qcut(group["score"].rank(method="first"), n_buckets, labels=False)
+        top = group["fwd_return"][buckets == n_buckets - 1].mean()
+        bottom = group["fwd_return"][buckets == 0].mean()
+        rows.append({"date": date, "top": top, "bottom": bottom, "spread": top - bottom})
+
+    if not rows:
+        return {"n_dates": 0}
+
+    spreads = pd.DataFrame(rows).set_index("date")["spread"]
+    return {
+        "n_dates": len(spreads),
+        "spread_mean": float(spreads.mean()),
+        "spread_std": float(spreads.std()),
+        "spread_positive_rate": float((spreads > 0).mean()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pooled classification
+# ---------------------------------------------------------------------------
 
 def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> tuple[float, float]:
     """Wilson score interval — reliable for proportions near 0 or 1."""
@@ -24,95 +125,53 @@ def wilson_interval(successes: int, n: int, confidence: float = 0.95) -> tuple[f
     return (max(0.0, centre - half), min(1.0, centre + half))
 
 
-def score(preds: pd.DataFrame) -> dict:
-    """Summarise one model's predictions on one ticker.
+def classification_summary(preds: pd.DataFrame) -> dict:
+    """Accuracy and calibration pooled across the panel.
 
-    `preds` needs columns: prob_up, pred_dir, y_true, fwd_return.
-    Rows whose outcome has not resolved yet are dropped.
+    Reported alongside the IC because they answer different questions: the IC
+    asks whether the ordering is right, this asks whether the probabilities
+    are.
     """
-    from sklearn.metrics import (
-        accuracy_score, balanced_accuracy_score, brier_score_loss,
-        matthews_corrcoef, roc_auc_score,
-    )
+    from sklearn.metrics import brier_score_loss, roc_auc_score
 
-    d = preds.dropna(subset=["y_true"])
+    d = preds.dropna(subset=["y_true", "score"])
     if d.empty:
         return {"n": 0}
 
     y_true = d["y_true"].astype(int).values
-    y_pred = d["pred_dir"].astype(int).values
-    prob = d["prob_up"].values
+    score = d["score"].values
+    y_pred = (score > 0.5).astype(int)
+
     n = len(d)
     correct = int((y_true == y_pred).sum())
-    accuracy = correct / n
-
     base_rate = float(y_true.mean())
-    # The harder of the two trivial strategies: always-up or always-down.
-    majority_rate = max(base_rate, 1 - base_rate)
-
+    majority = max(base_rate, 1 - base_rate)
     lo, hi = wilson_interval(correct, n)
 
     out = {
         "n": n,
-        "accuracy": accuracy,
+        "accuracy": correct / n,
         "accuracy_ci_low": lo,
         "accuracy_ci_high": hi,
-        "base_rate_up": base_rate,
-        "majority_baseline": majority_rate,
-        "edge_vs_majority": accuracy - majority_rate,
-        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
-        "mcc": matthews_corrcoef(y_true, y_pred) if len(set(y_pred)) > 1 else 0.0,
-        "brier": brier_score_loss(y_true, prob),
-        "pred_up_rate": float(y_pred.mean()),
-        # Binomial test against a coin flip, and against the majority class.
-        "p_value_vs_coin": stats.binomtest(correct, n, 0.5, alternative="greater").pvalue,
-        "p_value_vs_majority": stats.binomtest(correct, n, majority_rate, alternative="greater").pvalue,
+        "majority_baseline": majority,
+        "edge_vs_majority": correct / n - majority,
+        "base_rate": base_rate,
+        "brier": brier_score_loss(y_true, np.clip(score, 0, 1)),
     }
-
-    if len(set(y_true)) > 1 and len(set(prob)) > 1:
-        out["auc"] = roc_auc_score(y_true, prob)
-    else:
-        out["auc"] = float("nan")
-
+    out["auc"] = (
+        roc_auc_score(y_true, score)
+        if len(set(y_true)) > 1 and len(set(score)) > 1
+        else float("nan")
+    )
     return out
 
 
-def score_all(preds: pd.DataFrame, by: list[str] | None = None) -> pd.DataFrame:
-    """Score every experiment group, keyed by ticker/model/horizon/target_mode."""
+def evaluate(preds: pd.DataFrame, horizon: int, min_names: int = 20) -> dict:
+    """Full scorecard for one model's panel predictions."""
     if preds.empty:
-        return pd.DataFrame()
-
-    if by is None:
-        by = [c for c in ("ticker", "model", "horizon", "target_mode") if c in preds.columns]
-
-    rows = []
-    for keys, group in preds.groupby(by, sort=False):
-        keys = keys if isinstance(keys, tuple) else (keys,)
-        rows.append({**dict(zip(by, keys)), **score(group)})
-    return pd.DataFrame(rows)
-
-
-def mcnemar(preds_a: pd.DataFrame, preds_b: pd.DataFrame) -> dict:
-    """Test whether two models differ on the same days (paired, exact binomial)."""
-    a = preds_a.dropna(subset=["y_true"]).set_index("date")
-    b = preds_b.dropna(subset=["y_true"]).set_index("date")
-    common = a.index.intersection(b.index)
-    if len(common) == 0:
-        return {"n": 0, "p_value": float("nan")}
-
-    a_ok = (a.loc[common, "pred_dir"] == a.loc[common, "y_true"]).values
-    b_ok = (b.loc[common, "pred_dir"] == b.loc[common, "y_true"]).values
-
-    a_only = int((a_ok & ~b_ok).sum())
-    b_only = int((~a_ok & b_ok).sum())
-    discordant = a_only + b_only
-
-    if discordant == 0:
-        return {"n": len(common), "a_only": 0, "b_only": 0, "p_value": 1.0}
-
+        return {"n": 0}
     return {
-        "n": len(common),
-        "a_only": a_only,
-        "b_only": b_only,
-        "p_value": stats.binomtest(a_only, discordant, 0.5).pvalue,
+        **classification_summary(preds),
+        **ic_summary(preds, horizon=horizon, min_names=min_names),
+        **decile_spread(preds, min_names=min_names),
     }
