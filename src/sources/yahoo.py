@@ -34,6 +34,16 @@ MARKET_SERIES = {
     "hy_credit": "HYG",
     "ig_credit": "LQD",
     "spx": "^GSPC",
+    "russell": "IWM",
+}
+
+# Sector ETFs, used to describe where the market's leadership sits rather than
+# as cross-section members. Their dispersion measures rotation, which single
+# names cannot report about themselves.
+SECTOR_SERIES = {
+    "tech": "XLK", "financials": "XLF", "health": "XLV", "energy": "XLE",
+    "industrials": "XLI", "discretionary": "XLY", "staples": "XLP",
+    "utilities": "XLU", "materials": "XLB",
 }
 
 
@@ -93,18 +103,25 @@ def load_many(
 
 
 def load_market_state(start: str, end: str | None = None) -> pd.DataFrame:
-    """Cross-asset series aligned on one daily index.
+    """Cross-asset and sector series aligned on one daily index.
 
     Forward-filled because these markets keep different calendars; a stale
     value is what an observer would have seen, so filling forward stays causal.
+    Sector columns are prefixed so the feature layer can find them.
     """
     columns = {}
+
     for name, ticker in MARKET_SERIES.items():
         df = load_prices(ticker, start, end)
         if not df.empty:
             columns[name] = df["Close"]
         else:
             logger.warning("Market series unavailable: %s (%s)", name, ticker)
+
+    for name, ticker in SECTOR_SERIES.items():
+        df = load_prices(ticker, start, end)
+        if not df.empty:
+            columns[f"sector_{name}"] = df["Close"]
 
     if not columns:
         return pd.DataFrame()

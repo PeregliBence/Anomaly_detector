@@ -142,6 +142,28 @@ def build_market_features(market: pd.DataFrame) -> pd.DataFrame:
             market["spx"] / market["spx"].rolling(252, min_periods=20).max() - 1
         )
 
+    # Small caps relative to large: a risk-appetite gauge.
+    if "russell" in market and "spx" in market:
+        ratio = market["russell"] / (market["spx"] + 1e-9)
+        out["small_large_momentum_60"] = np.log(ratio / ratio.shift(60))
+
+    # Sector rotation. How far apart the sectors have travelled says whether
+    # the market is moving as a block or discriminating between industries —
+    # something no single name can report about itself.
+    sector_cols = [c for c in market.columns if c.startswith("sector_")]
+    if len(sector_cols) >= 4:
+        sector_mom = pd.DataFrame({
+            col: np.log(market[col] / market[col].shift(60)) for col in sector_cols
+        })
+        out["sector_dispersion_60"] = sector_mom.std(axis=1)
+        out["sector_max_spread_60"] = sector_mom.max(axis=1) - sector_mom.min(axis=1)
+
+        sector_ret = pd.DataFrame({
+            col: np.log(market[col] / market[col].shift(1)) for col in sector_cols
+        })
+        out["sector_dispersion_1"] = sector_ret.std(axis=1)
+        out["sector_breadth"] = (sector_ret.rolling(20).mean() > 0).mean(axis=1)
+
     return out.replace([np.inf, -np.inf], np.nan)
 
 

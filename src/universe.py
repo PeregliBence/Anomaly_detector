@@ -32,25 +32,22 @@ LARGE_CAP = [
     "DIS", "CMCSA", "NFLX", "T", "VZ", "TMUS", "PARA", "WBD",
 ]
 
-# Sector and asset-class ETFs. These widen the cross-section beyond single
-# stocks and give the panel instruments whose risk is not idiosyncratic.
-ETFS = [
-    "SPY", "QQQ", "IWM", "DIA", "MDY",
-    "XLK", "XLF", "XLV", "XLE", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE",
-    "EFA", "EEM", "EWJ", "EWG", "EWU", "FXI", "INDA",
-    "TLT", "IEF", "SHY", "LQD", "HYG", "TIP", "AGG",
-    "GLD", "SLV", "USO", "DBC", "UNG",
-    "VNQ", "XBI", "SMH", "ITB", "KRE",
-]
-
+# ETFs are deliberately NOT panel members.
+#
+# A cross-sectional target asks whether an instrument beat the field's median.
+# A diversified ETF holds dozens of the field's own members, so its return is
+# close to their average by construction and it lands near the median almost
+# every period. Mixing ETFs into the cross-section therefore adds rows that
+# are nearly unrankable, diluting the signal the target is meant to measure.
+#
+# They belong in the market-state features instead, where breadth and sector
+# rotation are exactly what they describe — see sources.yahoo.MARKET_SERIES.
 CRYPTO = ["BTC-USD", "ETH-USD"]
 
 
-def default(include_etfs: bool = True, include_crypto: bool = False) -> list[str]:
-    """The working universe for an experiment run."""
+def default(include_crypto: bool = False) -> list[str]:
+    """The working universe for an experiment run: single names only."""
     tickers = list(LARGE_CAP)
-    if include_etfs:
-        tickers += ETFS
     if include_crypto:
         tickers += CRYPTO
     return tickers
@@ -59,4 +56,4 @@ def default(include_etfs: bool = True, include_crypto: bool = False) -> list[str
 def small(n: int = 60) -> list[str]:
     """A reduced universe for quick iteration, spread across sectors."""
     step = max(1, len(LARGE_CAP) // n)
-    return LARGE_CAP[::step][:n] + ETFS[:10]
+    return LARGE_CAP[::step][:n]
