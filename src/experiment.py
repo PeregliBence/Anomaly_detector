@@ -1,9 +1,10 @@
-"""Run one experiment: a universe, a horizon, a target, a set of models."""
+"""Run one experiment: a universe, a set of horizons, a target, a set of models."""
 
 from __future__ import annotations
 
 import logging
 from functools import partial
+from typing import Sequence
 
 import pandas as pd
 
@@ -16,6 +17,53 @@ from src.validation import tune_on_train, walk_forward
 
 logger = logging.getLogger(__name__)
 
+# Long enough for the slowest feature (12-1 momentum needs 252 days) to warm
+# up before the first in-sample date.
+WARMUP_YEARS = 2
+
+
+def _warmup_start(start: str) -> str:
+    return (pd.Timestamp(start) - pd.DateOffset(years=WARMUP_YEARS)).strftime("%Y-%m-%d")
+
+
+def load_sharadar_panel(
+    horizons: Sequence[int],
+    start: str = START_DATE,
+    size: int = 1000,
+    rebalance_days: int = 63,
+) -> pd.DataFrame:
+    """The research panel: point-in-time liquid universe, delisting-aware."""
+    from src import universe
+    from src.sources import sharadar
+
+    warmup = _warmup_start(start)
+    meta = sharadar.equity_meta()
+    logger.info("Eligible common stocks: %d", len(meta))
+
+    prices = sharadar.load_prices(start=warmup, tickers=meta.index.tolist())
+    logger.info("Loaded %d price rows", len(prices))
+
+    membership = universe.liquid_membership(
+        prices, size=size, rebalance_days=rebalance_days, start=start
+    )
+    members = set(membership.get_level_values("ticker"))
+    prices = prices[prices["ticker"].isin(members)]
+
+    frames = (
+        (ticker, group.drop(columns="ticker").set_index("date"))
+        for ticker, group in prices.groupby("ticker", sort=False)
+    )
+    delisted = set(meta.index[meta["isdelisted"] == "Y"])
+    market = yahoo.load_market_state(start=warmup)
+
+    panel = build_panel(
+        frames, horizons=horizons, market=market, delisted=delisted, keep=membership
+    )
+    del prices
+    if panel.empty:
+        return panel
+    return add_cross_sectional_features(panel)
+
 
 def load_panel(
     tickers: list[str],
@@ -24,18 +72,15 @@ def load_panel(
     end: str | None = None,
     universe_size: int | None = None,
 ) -> pd.DataFrame:
-    """Download and assemble the panel, ready for `run`."""
-    logger.info("Loading %d instruments from %s", len(tickers), start)
+    """yfinance panel over a fixed ticker list. Survivor-only — see universe.py."""
     frames = yahoo.load_many(tickers, start=start, end=end)
     market = yahoo.load_market_state(start=start, end=end)
 
-    panel = build_panel(frames, horizon=horizon, market=market)
+    panel = build_panel(frames, horizons=[horizon], market=market)
     if panel.empty:
         return panel
-
     if universe_size:
         panel = apply_universe_filter(panel, size=universe_size)
-
     return add_cross_sectional_features(panel)
 
 
@@ -47,12 +92,12 @@ def run(
     tune: bool = False,
     **wf_kwargs,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Walk-forward every model over the panel.
+    """Walk-forward every model over the panel for one horizon.
 
     Returns (predictions, scorecard). Predictions carry a `model` column so
     several models' output can be stored together.
     """
-    X, y, fwd = split_xy(panel, target_mode=target_mode)
+    X, y, fwd = split_xy(panel, horizon=horizon, target_mode=target_mode)
     if X.empty:
         logger.warning("No usable rows for target '%s'", target_mode)
         return pd.DataFrame(), pd.DataFrame()
@@ -75,22 +120,17 @@ def run(
 
         try:
             preds = walk_forward(
-                X, y, fwd,
-                partial(factory, **params),
-                horizon=horizon,
-                **wf_kwargs,
+                X, y, fwd, partial(factory, **params), horizon=horizon, **wf_kwargs
             )
-        except Exception as e:
-            logger.warning("  %s failed: %s", name, e)
+        except Exception:
+            logger.exception("  %s failed", name)
             continue
 
         if preds.empty:
             continue
 
         score = evaluate(preds, horizon=horizon, min_names=MIN_NAMES_PER_DATE)
-        rows.append({
-            "model": name, "horizon": horizon, "target": target_mode, **score
-        })
+        rows.append({"model": name, "horizon": horizon, "target": target_mode, **score})
 
         preds["model"] = name
         preds["horizon"] = horizon
@@ -98,5 +138,4 @@ def run(
         all_preds.append(preds)
 
     predictions = pd.concat(all_preds) if all_preds else pd.DataFrame()
-    scorecard = pd.DataFrame(rows)
-    return predictions, scorecard
+    return predictions, pd.DataFrame(rows)

@@ -40,12 +40,18 @@ def walk_forward(
     min_train_days: int = MIN_TRAIN_DAYS,
     refit_every: int = REFIT_EVERY,
     train_window_days: int | None = None,
+    train_stride: int = 1,
 ) -> pd.DataFrame:
     """Score every date after the warm-up using only prior information.
 
     `X` is indexed by (date, ticker). The model is refit every `refit_every`
     trading days; between refits the frozen model scores each day, which is
     what a deployed system does.
+
+    `train_stride` keeps every k-th date for training. With an h-day horizon,
+    labels on neighbouring days share h-1 days of the same future, so daily
+    rows are close to duplicates: thinning them costs little information and
+    cuts fitting time by the same factor. Prediction still covers every date.
 
     Returns one row per prediction, indexed by (date, ticker).
     """
@@ -56,6 +62,9 @@ def walk_forward(
         return pd.DataFrame()
 
     date_level = X.index.get_level_values("date")
+    train_dates_ok = np.ones(len(X), dtype=bool)
+    if train_stride > 1:
+        train_dates_ok = date_level.isin(dates[::train_stride])
     records = []
 
     for start in range(min_train_days, len(dates), refit_every):
@@ -66,7 +75,7 @@ def walk_forward(
         if train_window_days is not None:
             lower = dates[max(0, start - horizon - train_window_days)]
 
-        train_mask = date_level <= cutoff
+        train_mask = (date_level <= cutoff) & train_dates_ok
         if lower is not None:
             train_mask &= date_level >= lower
 

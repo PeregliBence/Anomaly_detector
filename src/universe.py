@@ -1,18 +1,70 @@
 """Instrument universe.
 
-Interim definition until Sharadar's delisting-aware data is available. This
-list holds today's large-cap survivors, which means results computed on it are
-optimistic: companies that failed over the period are simply absent, so the
-sample is conditioned on survival.
+Two definitions live here, on purpose.
 
-That bias is one of the errors the thesis measures, so the list is explicitly
-marked rather than quietly used. `SURVIVORSHIP_BIASED` exists to be asserted
-against in the final run.
+`liquid_membership` is the research universe: built from Sharadar's
+delisting-aware prices, it selects the most liquid common stocks as of each
+rebalance date using only data available then. Companies that later failed
+are in it for as long as they were liquid, exactly as an investor at the time
+would have seen them.
+
+`LARGE_CAP` is today's survivors. Results computed on it are optimistic,
+because companies that failed over the period are simply absent. It is kept
+for the live daily run — where today's list is legitimately known — and as
+the biased comparison the survivorship measurement needs.
 """
 
 from __future__ import annotations
 
-SURVIVORSHIP_BIASED = True
+import logging
+
+import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+SURVIVORSHIP_BIASED = True  # applies to LARGE_CAP only
+
+
+def liquid_membership(
+    prices: pd.DataFrame,
+    size: int = 1000,
+    rebalance_days: int = 63,
+    min_price: float = 5.0,
+    adv_window: int = 60,
+    start: str | None = None,
+) -> pd.MultiIndex:
+    """Point-in-time liquid universe as a (date, ticker) index.
+
+    On each rebalance date the `size` names with the highest trailing average
+    dollar volume, among those trading at or above `min_price` unadjusted, are
+    selected and held until the next rebalance. Everything the selection
+    looks at is known at that date's close.
+    """
+    dollar_vol = prices.pivot(index="date", columns="ticker", values="DollarVolume")
+    adv = dollar_vol.rolling(adv_window, min_periods=adv_window // 2).mean().astype("float32")
+    del dollar_vol
+
+    price = prices.pivot(index="date", columns="ticker", values="CloseUnadj")
+    eligible = adv.where(price >= min_price)
+    del price, adv
+
+    dates = eligible.index
+    if start is not None:
+        dates = dates[dates >= pd.Timestamp(start)]
+
+    rebalance_dates = dates[::rebalance_days]
+    pairs = []
+    for i, as_of in enumerate(rebalance_dates):
+        selected = eligible.loc[as_of].dropna().nlargest(size).index
+        end = rebalance_dates[i + 1] if i + 1 < len(rebalance_dates) else None
+        held = dates[(dates >= as_of) & ((dates < end) if end is not None else True)]
+        pairs.append(pd.MultiIndex.from_product([held, selected], names=["date", "ticker"]))
+
+    membership = pairs[0].append(pairs[1:]) if len(pairs) > 1 else pairs[0]
+    logger.info("Universe: %d rebalances, %d distinct names, %d (date, ticker) slots",
+                len(rebalance_dates), membership.get_level_values("ticker").nunique(),
+                len(membership))
+    return membership
 
 # Large-cap US equities across sectors.
 LARGE_CAP = [

@@ -229,7 +229,7 @@ def export_all(history: str = "full", force: bool = False) -> None:
 # Reading and verification
 # ---------------------------------------------------------------------------
 
-def load(table: str, columns: list[str] | None = None) -> pd.DataFrame:
+def load(table: str, columns: list[str] | None = None, filters=None) -> pd.DataFrame:
     """Read an exported table from the local snapshot."""
     path = SNAPSHOT_DIR / f"{table}.parquet"
     if not path.exists():
@@ -237,7 +237,63 @@ def load(table: str, columns: list[str] | None = None) -> pd.DataFrame:
             f"'{table}' has not been exported. Run scripts/sharadar_export.py "
             f"while the subscription is active."
         )
-    return pd.read_parquet(path, columns=columns)
+    return pd.read_parquet(path, columns=columns, filters=filters)
+
+
+# Ordinary common equity on the main US exchanges — the equivalent of CRSP
+# share codes 10/11. ADRs, preferreds and secondary share classes are left
+# out; the last because dual-class pairs (GOOG/GOOGL) would enter the
+# cross-section as near-duplicates.
+COMMON_STOCK = {"Domestic Common Stock", "Domestic Common Stock Primary Class"}
+MAIN_EXCHANGES = {"NYSE", "NASDAQ", "NYSEMKT"}
+
+
+def equity_meta() -> pd.DataFrame:
+    """Security master for the eligible common-stock universe, one row per ticker."""
+    meta = load("tickers")
+    meta = meta[
+        (meta["table"] == "SEP")
+        & meta["category"].isin(COMMON_STOCK)
+        & meta["exchange"].isin(MAIN_EXCHANGES)
+    ]
+    return meta.drop_duplicates("ticker").set_index("ticker")
+
+
+def load_prices(start: str, tickers: list[str] | None = None) -> pd.DataFrame:
+    """Daily prices for eligible stocks in long format, ready for per-ticker features.
+
+    Columns follow the yfinance naming the feature layer expects:
+    Close is dividend- and split-adjusted, so returns are total returns;
+    Open/High/Low are rescaled by the same factor so ranges stay consistent.
+    DollarVolume is split-adjusted close times volume — dividend adjustment
+    would deflate past turnover more for high-yield names and tilt the
+    liquidity ranking. CloseUnadj is kept for the minimum-price screen.
+    """
+    if tickers is None:
+        tickers = equity_meta().index.tolist()
+
+    raw = load(
+        "stocks",
+        columns=["ticker", "date", "open", "high", "low", "close",
+                 "volume", "closeadj", "closeunadj"],
+        filters=[("date", ">=", pd.Timestamp(start)), ("ticker", "in", tickers)],
+    )
+    raw["date"] = pd.to_datetime(raw["date"])
+    raw = raw[(raw["close"] > 0) & (raw["closeadj"] > 0)]
+
+    factor = raw["closeadj"] / raw["close"]
+    prices = pd.DataFrame({
+        "ticker": raw["ticker"].values,
+        "date": raw["date"].values,
+        "Open": (raw["open"] * factor).values,
+        "High": (raw["high"] * factor).values,
+        "Low": (raw["low"] * factor).values,
+        "Close": raw["closeadj"].values,
+        "Volume": raw["volume"].values,
+        "DollarVolume": (raw["close"] * raw["volume"]).values,
+        "CloseUnadj": raw["closeunadj"].values,
+    })
+    return prices.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
 def _coverage(path: Path) -> dict:

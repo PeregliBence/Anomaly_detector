@@ -84,7 +84,9 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     out["atr_norm"] = _atr(df) / (close + 1e-9)
 
     # --- liquidity --------------------------------------------------------
-    dollar_volume = close * volume
+    # Prefer a source-supplied dollar volume: with a dividend-adjusted Close,
+    # close * volume understates past turnover more for high-yield names.
+    dollar_volume = df["DollarVolume"] if "DollarVolume" in df else close * volume
     out["dollar_volume"] = dollar_volume.rolling(20).mean()
     out["log_dollar_volume"] = np.log1p(out["dollar_volume"])
     out["volume_spike"] = volume / (volume.rolling(20).median() + 1e-9)
@@ -167,6 +169,20 @@ def build_market_features(market: pd.DataFrame) -> pd.DataFrame:
     return out.replace([np.inf, -np.inf], np.nan)
 
 
-def forward_return(df: pd.DataFrame, horizon: int) -> pd.Series:
-    """Realised log return from t to t+horizon."""
-    return np.log(df["Close"].shift(-horizon) / df["Close"])
+def forward_return(df: pd.DataFrame, horizon: int, delisted: bool = False) -> pd.Series:
+    """Realised log return from t to t+horizon.
+
+    For a delisted security the series ends because it stopped trading, not
+    because the future is unknown. Rows within `horizon` of that end resolve
+    at the last traded price. Leaving them unlabelled would quietly drop the
+    bankruptcies and buyouts from the label set — survivorship bias
+    re-entering through the target instead of the universe.
+    """
+    close = df["Close"]
+    fwd = np.log(close.shift(-horizon) / close)
+
+    if delisted and len(close):
+        tail = fwd.isna() & close.notna()
+        fwd[tail] = np.log(close.iloc[-1] / close[tail])
+
+    return fwd
