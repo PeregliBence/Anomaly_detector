@@ -20,7 +20,9 @@ CACHE_DIR = DATA_DIR / "cache"
 STORE_PATH = DATA_DIR / "research.db"
 RESULTS_DIR = ROOT / "results"
 
-SHARADAR_KEY = os.environ.get("NASDAQ_DATA_LINK_API_KEY", "")
+# Issued on the sharadar.com account. A Nasdaq Data Link key does not work
+# here: it only reaches Sharadar's free sample.
+SHARADAR_KEY = os.environ.get("SHARADAR_API_KEY", "")
 POLYGON_KEY = os.environ.get("POLYGON_API_KEY", "")
 FINNHUB_KEY = os.environ.get("FINNHUB_API_KEY", "")
 
