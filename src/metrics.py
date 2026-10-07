@@ -57,17 +57,37 @@ def newey_west_tstat(series: pd.Series, lags: int) -> tuple[float, float]:
     return (float(x.mean() / se), float(se))
 
 
-def ic_summary(preds: pd.DataFrame, horizon: int, min_names: int = 20) -> dict:
-    """Mean IC with overlap-corrected significance."""
+def ic_summary(
+    preds: pd.DataFrame, horizon: int, min_names: int = 20, refit_every: int = 0
+) -> dict:
+    """Mean IC with overlap-corrected significance.
+
+    Two sources of autocorrelation are covered. Overlapping horizons correlate
+    ICs up to h-1 days apart; and one frozen model scores every day between
+    refits, so its errors persist for a whole refit block. The Newey-West lag
+    is the longer of the two. When fold boundaries are known, a second
+    t-statistic is computed on per-fold means, which is the more conservative
+    of the pair.
+    """
     ic = rank_ic(preds, min_names=min_names)
     if ic.empty:
         return {"n_dates": 0}
 
-    t_stat, se = newey_west_tstat(ic, lags=max(horizon - 1, 1))
+    t_stat, se = newey_west_tstat(ic, lags=max(horizon - 1, refit_every, 1))
     mean = float(ic.mean())
     std = float(ic.std())
 
+    fold_t, n_folds = float("nan"), 0
+    if "train_end" in preds.columns:
+        fold = preds["train_end"].groupby(level="date").first().reindex(ic.index)
+        fold_means = ic.groupby(fold.values).mean()
+        n_folds = len(fold_means)
+        block = max(refit_every, 1)
+        fold_t, _ = newey_west_tstat(fold_means, lags=max(int(np.ceil(horizon / block)), 1))
+
     return {
+        "ic_tstat_folds": fold_t,
+        "n_folds": n_folds,
         "n_dates": len(ic),
         "ic_mean": mean,
         "ic_std": std,
@@ -166,12 +186,14 @@ def classification_summary(preds: pd.DataFrame) -> dict:
     return out
 
 
-def evaluate(preds: pd.DataFrame, horizon: int, min_names: int = 20) -> dict:
+def evaluate(
+    preds: pd.DataFrame, horizon: int, min_names: int = 20, refit_every: int = 0
+) -> dict:
     """Full scorecard for one model's panel predictions."""
     if preds.empty:
         return {"n": 0}
     return {
         **classification_summary(preds),
-        **ic_summary(preds, horizon=horizon, min_names=min_names),
+        **ic_summary(preds, horizon=horizon, min_names=min_names, refit_every=refit_every),
         **decile_spread(preds, min_names=min_names),
     }

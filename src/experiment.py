@@ -9,7 +9,7 @@ from typing import Sequence
 import pandas as pd
 
 from src import models as model_lib
-from src.config import MIN_NAMES_PER_DATE, START_DATE
+from src.config import MIN_NAMES_PER_DATE, REFIT_EVERY, START_DATE
 from src.metrics import evaluate
 from src.panel import add_cross_sectional_features, apply_universe_filter, build_panel, split_xy
 from src.sources import yahoo
@@ -129,7 +129,10 @@ def run(
         if preds.empty:
             continue
 
-        score = evaluate(preds, horizon=horizon, min_names=MIN_NAMES_PER_DATE)
+        score = evaluate(
+            preds, horizon=horizon, min_names=MIN_NAMES_PER_DATE,
+            refit_every=wf_kwargs.get("refit_every", REFIT_EVERY),
+        )
         rows.append({"model": name, "horizon": horizon, "target": target_mode, **score})
 
         preds["model"] = name
