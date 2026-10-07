@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pandas as pd
 import requests
@@ -65,7 +66,13 @@ COVERAGE = {
     "actions": {"min_tickers": 3000, "min_years": 15},
 }
 
-_URL_FIELDS = ("url", "downloadUrl", "download_url", "presignedUrl", "signedUrl", "href", "link")
+YEARS_PARAM = {"full": "full", "10y": "10", "5y": "5"}
+
+
+def _headers() -> dict:
+    # Header rather than query string, so the key never appears in a URL that
+    # an exception message or log line might echo.
+    return {"x-api-key": require(SHARADAR_KEY, "SHARADAR_API_KEY")}
 
 
 # ---------------------------------------------------------------------------
@@ -73,15 +80,16 @@ _URL_FIELDS = ("url", "downloadUrl", "download_url", "presignedUrl", "signedUrl"
 # ---------------------------------------------------------------------------
 
 def list_files(history: str = "full") -> pd.DataFrame:
-    """The bulk manifest for one history tier, with download entitlement."""
-    key = require(SHARADAR_KEY, "SHARADAR_API_KEY")
-    resp = requests.get(f"{API}/bulk", params={"api_key": key}, timeout=120)
+    """The bulk manifest for one history tier: names, sizes, entitlement."""
+    resp = requests.get(f"{API}/bulk", headers=_headers(), timeout=120)
     resp.raise_for_status()
     payload = resp.json()
 
+    # signedIn and canDownload describe a browser session on the Bulk UI, not
+    # the API key: they read false even for a paid key whose downloads work.
+    # Entitlement is decided by the data route, which _presigned_url uses.
     if not payload.get("signedIn"):
-        logger.warning("Sharadar reports signedIn=false: the key is not a "
-                       "subscriber key. Copy it from your sharadar.com account.")
+        logger.debug("Bulk manifest reports signedIn=false (browser-session flag)")
 
     items = pd.DataFrame(payload.get("items", []))
     if items.empty:
@@ -89,11 +97,26 @@ def list_files(history: str = "full") -> pd.DataFrame:
     return items[items["history"] == history].reset_index(drop=True)
 
 
-def _download_url(item: dict) -> str | None:
-    for field in _URL_FIELDS:
-        if item.get(field):
-            return item[field]
-    return None
+def _presigned_url(table: str, history: str) -> str:
+    """Ask the data route for a bulk zip; it answers with a redirect to S3.
+
+    The redirect is resolved by hand so the follow-up download goes to S3
+    without the API key attached.
+    """
+    resp = requests.get(
+        f"{API}/data/{table}",
+        params={"years": YEARS_PARAM[history]},
+        headers=_headers(),
+        timeout=120,
+        allow_redirects=False,
+    )
+    if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("location"):
+        return resp.headers["location"]
+    if resp.status_code == 401:
+        raise PermissionError(f"{table}: 401 — key not accepted. Check SHARADAR_API_KEY.")
+    if resp.status_code == 403:
+        raise PermissionError(f"{table}: 403 — {resp.text[:200]}")
+    raise RuntimeError(f"{table}: expected a redirect, got HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 def _stream_to_disk(url: str, path: Path, expected_size: int | None) -> None:
@@ -152,25 +175,31 @@ def _zip_to_parquet(zip_path: Path, out_path: Path) -> int:
     return rows
 
 
-def export_file(item: dict, force: bool = False) -> int | None:
-    """Download one archive and convert it. Returns the row count."""
-    table = item["table"]
-    out_path = SNAPSHOT_DIR / f"{table}.parquet"
-    zip_path = RAW_DIR / item["name"]
+# Small tables first, so a failure on a multi-gigabyte file cannot leave the
+# cheap-but-essential ones (tickers, events) undownloaded.
+EXPORT_ORDER = [
+    "descriptions", "sp500", "metrics", "tickers", "actions", "events",
+    "holdings_investor", "holdings_ticker", "insiders", "funds",
+    "holdings", "fundamentals", "daily", "stocks",
+]
 
+
+def export_file(
+    table: str, history: str = "full", force: bool = False,
+    expected_size: int | None = None,
+) -> int | None:
+    """Download one table's bulk zip and convert it. Returns the row count."""
+    out_path = SNAPSHOT_DIR / f"{table}.parquet"
     if out_path.exists() and not force:
         logger.info("%s: already exported, skipping", table)
         return None
 
-    if not item.get("canDownload"):
-        raise PermissionError(f"{table}: not entitled to download ({item.get('historyLabel')})")
+    url = _presigned_url(table, history)
+    zip_path = RAW_DIR / (Path(urlparse(url).path).name or f"{table}.csv.zip")
 
-    url = _download_url(item)
-    if url is None:
-        raise KeyError(f"{table}: manifest item has no download link; fields: {sorted(item)}")
-
-    logger.info("%s: downloading %s (%s)", table, item["name"], item.get("sizeLabel", "?"))
-    _stream_to_disk(url, zip_path, item.get("size"))
+    size_label = f"{expected_size / 1e6:.0f} MB" if expected_size else "size unknown"
+    logger.info("%s: downloading %s (%s)", table, zip_path.name, size_label)
+    _stream_to_disk(url, zip_path, expected_size)
 
     logger.info("  %s: converting to parquet", table)
     rows = _zip_to_parquet(zip_path, out_path)
@@ -179,23 +208,21 @@ def export_file(item: dict, force: bool = False) -> int | None:
 
 
 def export_all(history: str = "full", force: bool = False) -> None:
-    """Export every table in the chosen history tier."""
-    manifest = list_files(history)
-    if manifest.empty:
-        raise RuntimeError("Bulk manifest is empty")
+    """Export every table at the chosen history tier."""
+    sizes: dict[str, int] = {}
+    try:
+        manifest = list_files(history)
+        sizes = dict(zip(manifest["table"], manifest["size"]))
+    except Exception as e:
+        # The manifest only supplies expected sizes for an integrity check;
+        # the download itself goes through the data route.
+        logger.warning("Bulk manifest unavailable, skipping size checks: %s", e)
 
-    blocked = manifest[~manifest["canDownload"].astype(bool)]
-    if not blocked.empty:
-        logger.error("Not entitled to %d of %d files at '%s' history: %s",
-                     len(blocked), len(manifest), history, blocked["table"].tolist())
-
-    # Small tables first, so a failure on a multi-gigabyte file does not
-    # leave the cheap-but-essential ones (tickers, events) undownloaded.
-    for item in manifest.sort_values("size").to_dict("records"):
+    for table in EXPORT_ORDER:
         try:
-            export_file(item, force=force)
-        except Exception as e:
-            logger.error("%s: export failed: %s", item["table"], e)
+            export_file(table, history, force, sizes.get(table))
+        except Exception:
+            logger.exception("%s: export failed", table)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +240,7 @@ def load(table: str, columns: list[str] | None = None) -> pd.DataFrame:
     return pd.read_parquet(path, columns=columns)
 
 
-def _coverage(table: str, path: Path) -> dict:
+def _coverage(path: Path) -> dict:
     import pyarrow.parquet as pq
 
     schema_cols = set(pq.read_schema(path).names)
@@ -270,7 +297,7 @@ def verify() -> pd.DataFrame:
         if not path.exists():
             rows.append({"table": table, "status": "MISSING", "purpose": purpose})
             continue
-        info = _coverage(table, path)
+        info = _coverage(path)
         rows.append({
             "table": table, "status": _judge(table, info),
             "size_mb": round(path.stat().st_size / 1e6, 1), **info,
