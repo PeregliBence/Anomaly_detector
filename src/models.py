@@ -245,7 +245,24 @@ BASELINES = ["random", "constant", "cs_momentum", "cs_reversal", "cs_low_vol"]
 LEARNED = ["logistic", "lightgbm", "xgboost"]
 
 
+# Neural models import torch, so they are resolved only when asked for.
+NEURAL = {"mlp": "MLP", "lstm": "LSTM"}
+
+
+def _resolve(name: str) -> type[Model]:
+    if name in REGISTRY:
+        return REGISTRY[name]
+    if name in NEURAL:
+        from src import neural
+        return getattr(neural, NEURAL[name])
+    raise KeyError(f"Unknown model '{name}'. Available: {sorted(REGISTRY) + sorted(NEURAL)}")
+
+
+def needs_horizon(name: str) -> bool:
+    """Models whose training needs the horizon — for a purged validation split."""
+    return name in NEURAL or getattr(REGISTRY.get(name), "needs_horizon", False)
+
+
 def build(name: str, **params) -> Model:
-    if name not in REGISTRY:
-        raise KeyError(f"Unknown model '{name}'. Available: {sorted(REGISTRY)}")
-    return REGISTRY[name](**params) if params else REGISTRY[name]()
+    cls = _resolve(name)
+    return cls(**params) if params else cls()

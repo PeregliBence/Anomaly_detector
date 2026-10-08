@@ -45,6 +45,26 @@ def _member_dates(keep: pd.MultiIndex) -> dict[str, pd.DatetimeIndex]:
     return {t: pd.DatetimeIndex(g["date"]) for t, g in frame.groupby("ticker")}
 
 
+def sequence_columns(df: pd.DataFrame, feats: pd.DataFrame, seq_len: int) -> pd.DataFrame:
+    """The last `seq_len` days of three daily channels, as lag columns.
+
+    Named seq_<channel>_<lag>, lag 0 being the current day. The LSTM reshapes
+    them into a sequence; every other model receives the same columns flat,
+    so all architectures see identical information.
+    """
+    channels = {
+        "ret": feats["log_return"],
+        "vol": np.log(feats["volume_spike"].clip(lower=1e-6)),
+        "rng": np.log(df["High"] / df["Low"]).replace([np.inf, -np.inf], np.nan),
+    }
+    cols = {
+        f"seq_{name}_{lag:02d}": series.shift(lag)
+        for name, series in channels.items()
+        for lag in range(seq_len)
+    }
+    return pd.DataFrame(cols, index=feats.index)
+
+
 def build_panel(
     frames: dict[str, pd.DataFrame] | Iterable[tuple[str, pd.DataFrame]],
     horizons: Sequence[int],
@@ -52,11 +72,13 @@ def build_panel(
     min_rows: int = 300,
     delisted: set[str] | None = None,
     keep: pd.MultiIndex | None = None,
+    seq_len: int = 0,
 ) -> pd.DataFrame:
     """Stack per-instrument frames into one panel indexed by (date, ticker).
 
     `keep` restricts the rows to universe membership after each instrument's
     features are computed, so warm-up windows still see the full history.
+    `seq_len` > 0 adds daily lag columns for sequence models.
     Features are stored as float32 to keep a multi-million-row panel in RAM.
     """
     delisted = delisted or set()
@@ -71,6 +93,8 @@ def build_panel(
             continue
 
         feats = build_features(df)
+        if seq_len:
+            feats = feats.join(sequence_columns(df, feats, seq_len))
         for h in horizons:
             feats[fwd_col(h)] = forward_return(df, h, delisted=ticker in delisted)
 

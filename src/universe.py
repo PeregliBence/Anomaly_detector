@@ -66,6 +66,35 @@ def liquid_membership(
                 len(membership))
     return membership
 
+
+def todays_list_membership(
+    prices: pd.DataFrame,
+    size: int = 1000,
+    min_price: float = 5.0,
+    adv_window: int = 60,
+    start: str | None = None,
+) -> pd.MultiIndex:
+    """The naive universe: today's most liquid names, applied to all history.
+
+    This is what a study gets by downloading a current index or screener list
+    and backtesting it — every member is by construction a company that
+    survived to today. It exists to measure the bias, not to be used.
+    """
+    last = prices["date"].max()
+    window = prices[prices["date"] > last - pd.Timedelta(days=adv_window * 2)]
+    recent = window.groupby("ticker").agg(
+        adv=("DollarVolume", "mean"), price=("CloseUnadj", "last"), last_date=("date", "max")
+    )
+    recent = recent[(recent["last_date"] == last) & (recent["price"] >= min_price)]
+    selected = recent["adv"].nlargest(size).index
+
+    dates = pd.DatetimeIndex(prices["date"].unique()).sort_values()
+    if start is not None:
+        dates = dates[dates >= pd.Timestamp(start)]
+    membership = pd.MultiIndex.from_product([dates, selected], names=["date", "ticker"])
+    logger.info("Today's-list universe: %d names fixed across %d dates", len(selected), len(dates))
+    return membership
+
 # Large-cap US equities across sectors.
 LARGE_CAP = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AVGO", "ORCL", "CRM",

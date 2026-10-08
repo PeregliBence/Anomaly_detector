@@ -26,26 +26,50 @@ def _warmup_start(start: str) -> str:
     return (pd.Timestamp(start) - pd.DateOffset(years=WARMUP_YEARS)).strftime("%Y-%m-%d")
 
 
+UNIVERSE_MODES = ("point_in_time", "survivors", "todays_list")
+
+
 def load_sharadar_panel(
     horizons: Sequence[int],
     start: str = START_DATE,
     size: int = 1000,
     rebalance_days: int = 63,
+    universe_mode: str = "point_in_time",
+    seq_len: int = 0,
 ) -> pd.DataFrame:
-    """The research panel: point-in-time liquid universe, delisting-aware."""
+    """The research panel from Sharadar data.
+
+    universe_mode:
+      point_in_time — liquid names as of each rebalance, delisted included.
+                      The correct universe and the default.
+      survivors     — the same selection with every later-delisted company
+                      removed, isolating the effect of the delistings.
+      todays_list   — today's liquid names applied to all history, as a study
+                      built on a current screener list would do.
+    The last two exist only to measure survivorship bias.
+    """
     from src import universe
     from src.sources import sharadar
 
+    if universe_mode not in UNIVERSE_MODES:
+        raise ValueError(f"universe_mode must be one of {UNIVERSE_MODES}")
+
     warmup = _warmup_start(start)
     meta = sharadar.equity_meta()
-    logger.info("Eligible common stocks: %d", len(meta))
+    tickers = meta.index
+    if universe_mode == "survivors":
+        tickers = meta.index[meta["isdelisted"] != "Y"]
+    logger.info("Eligible common stocks (%s): %d", universe_mode, len(tickers))
 
-    prices = sharadar.load_prices(start=warmup, tickers=meta.index.tolist())
+    prices = sharadar.load_prices(start=warmup, tickers=tickers.tolist())
     logger.info("Loaded %d price rows", len(prices))
 
-    membership = universe.liquid_membership(
-        prices, size=size, rebalance_days=rebalance_days, start=start
-    )
+    if universe_mode == "todays_list":
+        membership = universe.todays_list_membership(prices, size=size, start=start)
+    else:
+        membership = universe.liquid_membership(
+            prices, size=size, rebalance_days=rebalance_days, start=start
+        )
     members = set(membership.get_level_values("ticker"))
     prices = prices[prices["ticker"].isin(members)]
 
@@ -57,7 +81,8 @@ def load_sharadar_panel(
     market = yahoo.load_market_state(start=warmup)
 
     panel = build_panel(
-        frames, horizons=horizons, market=market, delisted=delisted, keep=membership
+        frames, horizons=horizons, market=market, delisted=delisted,
+        keep=membership, seq_len=seq_len,
     )
     del prices
     if panel.empty:
@@ -111,11 +136,11 @@ def run(
         # variable and every fold would build the last model in the list.
         factory = partial(model_lib.build, name)
 
-        params = {}
+        params = {"horizon": horizon} if model_lib.needs_horizon(name) else {}
         if tune and name in model_lib.PARAM_GRIDS:
-            params = tune_on_train(
+            params.update(tune_on_train(
                 X, y, factory, model_lib.PARAM_GRIDS[name], horizon=horizon
-            )
+            ))
             logger.info("  tuned params: %s", params)
 
         try:
