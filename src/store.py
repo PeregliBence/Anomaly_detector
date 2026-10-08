@@ -52,6 +52,15 @@ CREATE TABLE IF NOT EXISTS predictions (
     fwd_return    REAL,
     PRIMARY KEY (experiment_id, date, ticker)
 ) WITHOUT ROWID;
+
+-- Per-date information coefficient, precomputed so charts need not read
+-- millions of prediction rows.
+CREATE TABLE IF NOT EXISTS daily_ic (
+    experiment_id INTEGER NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+    date          TEXT NOT NULL,
+    ic            REAL NOT NULL,
+    PRIMARY KEY (experiment_id, date)
+) WITHOUT ROWID;
 """
 
 
@@ -146,6 +155,13 @@ def save_experiment(
             .itertuples(index=False, name=None),
         )
 
+        from src.metrics import rank_ic
+        ic = rank_ic(predictions)
+        con.executemany(
+            "INSERT INTO daily_ic (experiment_id, date, ic) VALUES (?, ?, ?)",
+            ((exp_id, d.strftime("%Y-%m-%d"), float(v)) for d, v in ic.items()),
+        )
+
     logger.info("Stored experiment %d: %s/%s h=%d (%d predictions)",
                 exp_id, name, model, horizon, len(rows))
     return exp_id
@@ -171,6 +187,14 @@ def predictions(experiment_id: int) -> pd.DataFrame:
         )
     df["date"] = pd.to_datetime(df["date"])
     return df.set_index(["date", "ticker"])
+
+
+def daily_ic(experiment_id: int) -> pd.Series:
+    """One run's per-date information coefficient."""
+    with connect() as con:
+        df = pd.read_sql("SELECT date, ic FROM daily_ic WHERE experiment_id = ? ORDER BY date",
+                         con, params=(experiment_id,))
+    return pd.Series(df["ic"].values, index=pd.to_datetime(df["date"]), name="ic")
 
 
 def find(name: str, model: str, horizon: int, target: str = "cross_sectional",

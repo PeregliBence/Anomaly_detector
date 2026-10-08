@@ -1,22 +1,21 @@
-streamlit
-numpy
-pandas
-scikit-learn
-tensorflow==2.20.0
-yfinance
-altair
-streamlit-searchbox
-plotly
-python-dotenv
-statsmodels
-xgboost
-lightgbm
-# Advanced forecasting
-arch>=7.0
-fredapi
-river
-shap
-google-generativeai>=0.8.0
-# Optional (heavy deps — uncomment if needed)
-# pytorch-forecasting
-# lightning
+# Exact versions: the production models are pickled, and loading them with a
+# different LightGBM, XGBoost, torch or numpy version is not safe.
+numpy==2.4.3
+pandas==2.3.3
+pyarrow==23.0.1
+scipy==1.17.1
+scikit-learn==1.8.0
+lightgbm==4.6.0
+xgboost==3.2.0
+joblib==1.5.3
+yfinance==1.2.0
+requests==2.32.5
+python-dotenv==1.2.2
+
+# Neural models. Training on a GPU needs the CUDA build instead:
+#   pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0
+
+# Web interface
+streamlit==1.55.0
+plotly==6.6.0

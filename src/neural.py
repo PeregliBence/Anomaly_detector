@@ -96,6 +96,29 @@ class _TorchClassifier(Model):
     def _batches(self, tensors, idx):
         return [t[idx] for t in tensors]
 
+    # Pickling stores weights on the CPU and rebuilds the networks on load, so
+    # a model trained on a GPU loads on a machine without one, and the LSTM's
+    # locally defined network class never has to be pickled itself.
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        nets = state.pop("nets_", None)
+        if nets is not None:
+            state["net_states_"] = [
+                {k: v.detach().cpu() for k, v in net.state_dict().items()} for net in nets
+            ]
+        return state
+
+    def __setstate__(self, state):
+        net_states = state.pop("net_states_", None)
+        self.__dict__.update(state)
+        if net_states is not None:
+            device = _device()
+            self.nets_ = []
+            for weights in net_states:
+                net = self._network()
+                net.load_state_dict(weights)
+                self.nets_.append(net.to(device).eval())
+
     def fit(self, X: pd.DataFrame, y: pd.Series) -> "_TorchClassifier":
         torch = _torch()
         device = _device()

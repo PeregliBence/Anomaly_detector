@@ -97,9 +97,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     for lag in (1, 2, 5):
         out[f"ret_lag_{lag}"] = log_ret.shift(lag)
 
-    # Expanding rank keeps the regime label causal; a global quantile would
-    # leak the whole sample's distribution into every historical row.
-    out["vol_regime"] = out["vol_20"].expanding(min_periods=252).rank(pct=True)
+    # Every feature here needs at most a year of history. An expanding-window
+    # feature (an earlier vol_regime ranked against all history since 2003)
+    # would mean something different in the live run, which only downloads
+    # about a year and a half — a train/serve skew. Volatility regime is
+    # carried instead by vol_ratio and, cross-sectionally, cs_vol_20.
 
     return out.replace([np.inf, -np.inf], np.nan)
 
@@ -135,9 +137,12 @@ def build_market_features(market: pd.DataFrame) -> pd.DataFrame:
 
     for name in ("dollar", "gold", "oil"):
         if name in market:
-            out[f"{name}_momentum_60"] = np.log(
-                market[name] / market[name].shift(60)
-            )
+            # WTI front-month futures settled at -$37.63 on 2020-04-20. A
+            # log of that is undefined, and the NaN silently dropped every
+            # name's row on two dates around the COVID crash. A $1 floor keeps
+            # the day as the extreme collapse it was.
+            price = market[name].clip(lower=1.0)
+            out[f"{name}_momentum_60"] = np.log(price / price.shift(60))
 
     if "spx" in market:
         spx_ret = np.log(market["spx"] / market["spx"].shift(1))

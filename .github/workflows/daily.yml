@@ -1,0 +1,57 @@
+# Daily live run: predict for the latest US close, score matured forecasts,
+# and commit both. The commit history is the timestamp proving each forecast
+# existed before its outcome.
+#
+# Setup: add FRED_API_KEY under Settings > Secrets and variables > Actions.
+# The Sharadar snapshot is never needed here — the models are pre-trained.
+
+name: daily-predictions
+
+on:
+  schedule:
+    # 22:30 UTC on weekdays: after the 16:00 New York close in both EST and
+    # EDT, with time for the vendor's daily bar to settle.
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-predictions
+  cancel-in-progress: false
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-live.txt
+
+      - name: Install dependencies
+        run: |
+          pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-live.txt
+
+      - name: Predict and score
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m src.cli daily
+
+      - name: Commit live results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live/
+          if git diff --cached --quiet; then
+            echo "No new predictions or scores."
+          else
+            git commit -m "Live predictions $(date -u +%F)"
+            git push
+          fi

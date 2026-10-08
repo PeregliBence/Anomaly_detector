@@ -60,7 +60,7 @@ def cmd_backfill(args) -> None:
                 protocol={**protocol, "start": args.start, "size": args.size, "seq_len": args.seq_len},
                 predictions=preds, metrics=metrics,
             )
-            print(f"{model} h={h}: IC {metrics.get('ic_mean', float('nan')):.4f} — stored")
+            print(f"{model} h={h}: IC {metrics.get('ic_mean', float('nan')):.4f} - stored")
 
 
 def cmd_import(args) -> None:
@@ -89,7 +89,31 @@ def cmd_import(args) -> None:
                           "imported_from": str(path)},
                 predictions=group, metrics=metrics,
             )
-            print(f"{path.name}: {model} — IC {metrics.get('ic_mean', float('nan')):.4f} imported")
+            print(f"{path.name}: {model} - IC {metrics.get('ic_mean', float('nan')):.4f} imported")
+
+
+def cmd_train(args) -> None:
+    from src import production
+
+    production.train(horizons=args.horizons, start=args.start, size=args.size)
+    for h in args.horizons:
+        b = production.load(h)
+        print(f"h={h}: {list(b['members'])} trained {b['train_start']}..{b['train_end']} "
+              f"on {b['train_rows']:,} rows -> {production.bundle_path(h).name}")
+
+
+def cmd_live_universe(args) -> None:
+    from src import live
+
+    df = live.build_universe(size=args.size)
+    print(f"{len(df)} names as of {df['as_of'].iloc[0]} -> {live.UNIVERSE_FILE.relative_to(live.ROOT)}")
+
+
+def cmd_daily(args) -> None:
+    from src import live
+
+    summary = live.daily()
+    print(" | ".join(f"{k}: {v}" for k, v in summary.items()))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -118,10 +142,21 @@ def main(argv: list[str] | None = None) -> None:
     im.add_argument("--refit-every", type=int, default=63)
     im.add_argument("--train-stride", type=int, default=5)
 
+    tr = sub.add_parser("train", help="train production models on all history (needs Sharadar)")
+    tr.add_argument("--horizons", type=int, nargs="+", default=[5, 20])
+    tr.add_argument("--start", default="2005-01-01")
+    tr.add_argument("--size", type=int, default=1000)
+
+    lu = sub.add_parser("live-universe", help="freeze today's universe from Sharadar")
+    lu.add_argument("--size", type=int, default=1000)
+
+    sub.add_parser("daily", help="predict for the latest close and score matured forecasts")
+
     args = parser.parse_args(argv)
-    setup_logging("WARNING")
+    setup_logging("INFO" if args.command in ("train", "daily") else "WARNING")
     {"experiments": cmd_experiments, "backfill": cmd_backfill,
-     "import-results": cmd_import}[args.command](args)
+     "import-results": cmd_import, "train": cmd_train,
+     "live-universe": cmd_live_universe, "daily": cmd_daily}[args.command](args)
 
 
 if __name__ == "__main__":
