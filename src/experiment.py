@@ -36,6 +36,7 @@ def load_sharadar_panel(
     rebalance_days: int = 63,
     universe_mode: str = "point_in_time",
     seq_len: int = 0,
+    alt_features: bool = False,
 ) -> pd.DataFrame:
     """The research panel from Sharadar data.
 
@@ -84,9 +85,12 @@ def load_sharadar_panel(
         frames, horizons=horizons, market=market, delisted=delisted,
         keep=membership, seq_len=seq_len,
     )
-    del prices
     if panel.empty:
         return panel
+    if alt_features:
+        from src.alt_features import add_alternative_features
+        panel = add_alternative_features(panel, prices, market)
+    del prices
     return add_cross_sectional_features(panel)
 
 

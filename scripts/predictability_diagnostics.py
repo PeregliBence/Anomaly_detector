@@ -21,7 +21,7 @@ from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src import data
+from src.sources import yahoo
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)-7s | %(message)s")
 
@@ -97,7 +97,7 @@ def main() -> None:
     ac_rows, ceiling_rows, r2_rows = [], [], []
 
     for ticker in TICKERS:
-        df = data.load(ticker, start="2010-01-01", end="2026-09-01")
+        df = yahoo.load_prices(ticker, start="2010-01-01", end="2026-09-01")
         if df.empty:
             continue
         log_ret = np.log(df["Close"] / df["Close"].shift(1)).dropna()
