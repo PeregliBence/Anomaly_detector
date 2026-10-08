@@ -116,6 +116,13 @@ def cmd_daily(args) -> None:
     print(" | ".join(f"{k}: {v}" for k, v in summary.items()))
 
 
+def cmd_report(args) -> None:
+    from src import report
+
+    path = report.build(names=tuple(args.names))
+    print(f"Report written to {path}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m src.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -152,11 +159,15 @@ def main(argv: list[str] | None = None) -> None:
 
     sub.add_parser("daily", help="predict for the latest close and score matured forecasts")
 
+    rp = sub.add_parser("report", help="build the thesis tables from the research store")
+    rp.add_argument("--names", nargs="+", default=["final", "final_alt"])
+
     args = parser.parse_args(argv)
-    setup_logging("INFO" if args.command in ("train", "daily") else "WARNING")
+    setup_logging("INFO" if args.command in ("train", "daily", "report") else "WARNING")
     {"experiments": cmd_experiments, "backfill": cmd_backfill,
      "import-results": cmd_import, "train": cmd_train,
-     "live-universe": cmd_live_universe, "daily": cmd_daily}[args.command](args)
+     "live-universe": cmd_live_universe, "daily": cmd_daily,
+     "report": cmd_report}[args.command](args)
 
 
 if __name__ == "__main__":
