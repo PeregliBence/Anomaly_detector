@@ -179,7 +179,9 @@ def page_research() -> None:
     st.caption("Kiértékelés: 2008–2026, túlélési torzítástól mentes univerzum (a legforgalmasabb "
                "1000 részvény), purged walk-forward. A t-érték Newey-West korrekcióval, foldonként.")
 
-    arch = ex[ex["name"] == "architectures"]
+    # The final evaluation supersedes the earlier exploratory runs where present.
+    final = ex[ex["name"] == "final"]
+    arch = final[final["horizon"].isin([5, 20])] if not final.empty else ex[ex["name"] == "architectures"]
     if not arch.empty:
         st.subheader("Modell-architektúrák")
         view = arch.assign(Modell=arch["model"].map(label),
@@ -190,7 +192,24 @@ def page_research() -> None:
         fig.update_layout(height=380, margin=dict(t=30, b=10))
         st.plotly_chart(fig, width="stretch")
 
-    sweep = ex[ex["name"] == "horizon_sweep"]
+    alt = ex[ex["name"] == "final_alt"]
+    if not final.empty and not alt.empty:
+        st.subheader("Hozzáad-e az alternatív adat?")
+        st.caption("Fundamentumok, gyorsjelentés-meglepetés és -reakció, kedvezőtlen 8-K események, "
+                   "bennfentes kereskedés — ugyanaz a modell velük és nélkülük.")
+        both = pd.concat([final.assign(Változat="Ár- és piaci jellemzők"),
+                          alt.assign(Változat="+ alternatív adat")])
+        both = both[both["model"].isin(alt["model"])]
+        fig = px.bar(both.assign(Modell=both["model"].map(label)), x="Modell", y="ic_mean",
+                     color="Változat", barmode="group", facet_col="horizon",
+                     labels={"ic_mean": "Átlagos IC", "horizon": "Horizont (nap)"},
+                     color_discrete_sequence=["#0e4f52", "#c8934f"])
+        fig.update_layout(height=380, margin=dict(t=30, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+    sweep = final if not final.empty else ex[ex["name"] == "horizon_sweep"]
+    sweep = sweep[sweep["model"].isin(sweep.groupby("model")["horizon"].nunique()
+                                      .loc[lambda s: s >= 3].index)]
     if not sweep.empty:
         st.subheader("Horizontok")
         fig = px.line(sweep.assign(Modell=sweep["model"].map(label)).sort_values("horizon"),
