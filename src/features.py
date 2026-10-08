@@ -124,11 +124,14 @@ def build_market_features(market: pd.DataFrame) -> pd.DataFrame:
     if "yield_10y" in market:
         out["yield_10y_change_20"] = market["yield_10y"].diff(20)
 
-    # Credit: high yield relative to investment grade widens before equities.
-    if "hy_credit" in market and "ig_credit" in market:
-        ratio = market["hy_credit"] / (market["ig_credit"] + 1e-9)
-        out["credit_ratio"] = ratio
-        out["credit_momentum_60"] = np.log(ratio / ratio.shift(60))
+    # Credit: corporate spreads widen before equities fall. The Baa-Aaa
+    # default spread is the classic state variable (Fama and French, 1989).
+    if "baa10y" in market:
+        out["credit_spread"] = market["baa10y"]
+        out["credit_spread_change_60"] = market["baa10y"].diff(60)
+    if "dbaa" in market and "daaa" in market:
+        out["default_spread"] = market["dbaa"] - market["daaa"]
+        out["default_spread_change_60"] = out["default_spread"].diff(60)
 
     for name in ("dollar", "gold", "oil"):
         if name in market:

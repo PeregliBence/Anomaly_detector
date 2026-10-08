@@ -22,17 +22,18 @@ OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
 # Cross-asset state. These carry information no single equity's own history
 # does: the price of risk, the shape of the curve, the dollar, and credit.
+# Every series here has history back to 2003, so the macro features are
+# complete from the start of the study and 2008 falls in the test period.
+# ^VIX3M (from 2006) and the HYG/LQD credit ETFs (from 2007) were dropped for
+# that reason; credit now comes from FRED — see sources.fred.
 MARKET_SERIES = {
     "vix": "^VIX",
-    "vix3m": "^VIX3M",
     "yield_10y": "^TNX",
     "yield_13w": "^IRX",
     "yield_30y": "^TYX",
     "dollar": "DX-Y.NYB",
     "gold": "GC=F",
     "oil": "CL=F",
-    "hy_credit": "HYG",
-    "ig_credit": "LQD",
     "spx": "^GSPC",
     "russell": "IWM",
 }
@@ -126,6 +127,19 @@ def load_market_state(start: str, end: str | None = None) -> pd.DataFrame:
     if not columns:
         return pd.DataFrame()
 
-    market = pd.DataFrame(columns).sort_index().ffill()
+    market = pd.DataFrame(columns).sort_index()
+
+    try:
+        from src.sources.fred import load_credit_state
+        credit = load_credit_state(start)
+        if not credit.empty:
+            market = market.join(credit, how="outer")
+    except Exception as e:
+        logger.warning("Credit state unavailable: %s", e)
+
+    # Restrict to days the equity market traded, after forward-filling the
+    # series that keep other calendars.
+    trading_days = market["spx"].dropna().index if "spx" in market else market.index
+    market = market.sort_index().ffill().reindex(trading_days)
     market.index.name = "date"
     return market
