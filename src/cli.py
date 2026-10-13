@@ -126,6 +126,13 @@ def cmd_report(args) -> None:
     print(f"Report written to {path}")
 
 
+def cmd_export_research(args) -> None:
+    from src import research_export
+
+    files = research_export.export()
+    print(f"Exported to research/: {', '.join(files)}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m src.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -168,12 +175,15 @@ def main(argv: list[str] | None = None) -> None:
     rp.add_argument("--render-only", action="store_true",
                     help="rewrite report.md from the saved CSVs without recomputing")
 
+    sub.add_parser("export-research",
+                   help="write publishable research summaries to research/ for the web interface")
+
     args = parser.parse_args(argv)
     setup_logging("INFO" if args.command in ("train", "daily", "report") else "WARNING")
     {"experiments": cmd_experiments, "backfill": cmd_backfill,
      "import-results": cmd_import, "train": cmd_train,
      "live-universe": cmd_live_universe, "daily": cmd_daily,
-     "report": cmd_report}[args.command](args)
+     "report": cmd_report, "export-research": cmd_export_research}[args.command](args)
 
 
 if __name__ == "__main__":

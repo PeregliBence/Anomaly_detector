@@ -3,13 +3,16 @@
     streamlit run ui/dashboard.py
 
 The live pages read the committed files under live/. The research page reads
-the local research store (data/research.db), which is built from the licensed
-Sharadar snapshot and therefore exists only on the machine that holds it.
+the local research store (data/research.db) when it exists; elsewhere — on a
+hosted deployment, say — it falls back to the summaries exported to
+research/ by `python -m src.cli export-research`. The store itself derives
+from the licensed Sharadar snapshot and never leaves the machine that holds it.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -22,8 +25,10 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 PRED_DIR = ROOT / "live" / "predictions"
 SCORECARD = ROOT / "live" / "scorecard.csv"
-STORE = ROOT / "data" / "research.db"
-RESULTS = ROOT / "results"
+STORE = Path(os.environ.get("RESEARCH_DB", ROOT / "data" / "research.db"))
+RESEARCH = ROOT / "research"
+RESULTS = Path(os.environ.get("RESULTS_DIR", ROOT / "results"))
+HORIZONS = (5, 20)
 
 MODEL_LABELS = {
     "random": "Véletlen", "constant": "Konstans", "cs_momentum": "Momentum (12-1)",
@@ -75,20 +80,51 @@ def scorecard() -> pd.DataFrame:
 
 @st.cache_data(ttl=3600)
 def experiments() -> pd.DataFrame:
-    if not STORE.exists():
-        return pd.DataFrame()
-    with sqlite3.connect(STORE) as con:
-        df = pd.read_sql("SELECT * FROM experiments ORDER BY id", con)
-    metrics = pd.json_normalize(df["metrics"].map(json.loads))
-    return pd.concat([df.drop(columns=["metrics"]), metrics], axis=1)
+    if STORE.exists():
+        with sqlite3.connect(STORE) as con:
+            df = pd.read_sql("SELECT * FROM experiments ORDER BY id", con)
+        metrics = pd.json_normalize(df["metrics"].map(json.loads))
+        return pd.concat([df.drop(columns=["metrics"]), metrics], axis=1)
+    if (RESEARCH / "experiments.csv").exists():
+        return pd.read_csv(RESEARCH / "experiments.csv")
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
 def daily_ic(experiment_id: int) -> pd.Series:
-    with sqlite3.connect(STORE) as con:
-        df = pd.read_sql("SELECT date, ic FROM daily_ic WHERE experiment_id = ? ORDER BY date",
-                         con, params=(experiment_id,))
-    return pd.Series(df["ic"].values, index=pd.to_datetime(df["date"]))
+    if STORE.exists():
+        with sqlite3.connect(STORE) as con:
+            df = pd.read_sql("SELECT date, ic FROM daily_ic WHERE experiment_id = ? ORDER BY date",
+                             con, params=(experiment_id,))
+    else:
+        df = pd.read_parquet(RESEARCH / "daily_ic.parquet",
+                             filters=[("experiment_id", "==", experiment_id)])
+    return pd.Series(df["ic"].values, index=pd.to_datetime(df["date"])).sort_index()
+
+
+def research_table(results_path: str, export_name: str) -> pd.DataFrame | None:
+    """A results table from the local run if present, else from the export."""
+    for path in (RESULTS / results_path, RESEARCH / export_name):
+        if path.exists():
+            return pd.read_csv(path)
+    return None
+
+
+def pending_forecasts(files: list[Path], card: pd.DataFrame) -> pd.DataFrame:
+    """Forecasts not yet scored, with the date their horizon is expected to end.
+
+    Business days approximate the exchange calendar, so a holiday can push an
+    evaluation back by a day.
+    """
+    done = set(zip(card["date"].dt.strftime("%Y-%m-%d"), card["horizon"])) if not card.empty else set()
+    rows = []
+    for path in files:
+        for h in HORIZONS:
+            if (path.stem, h) not in done:
+                due = pd.Timestamp(path.stem) + pd.offsets.BDay(h)
+                rows.append({"Előrejelzés napja": path.stem, "Horizont (nap)": h,
+                             "Várható kiértékelés": due.strftime("%Y-%m-%d")})
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +182,14 @@ def page_track_record() -> None:
         "realizált hozam dátumonkénti rangkorrelációja."
     )
     sc = scorecard()
-    if sc.empty:
-        st.info("Még nincs lejárt előrejelzés. Az első 5 napos eredmény 5 kereskedési nappal "
-                "az első éles futás után jelenik meg.")
-        return
+    pending = pending_forecasts(prediction_files(), sc)
 
-    for h, group in sc.groupby("horizon"):
+    if sc.empty:
+        st.info("Még nincs lejárt előrejelzés. Egy előrejelzés akkor értékelődik ki, amikor "
+                "letelik a horizontja (5 vagy 20 kereskedési nap); a kiértékelést az aznap esti "
+                "automatikus futás végzi (22:30 UTC).")
+
+    for h, group in (sc.groupby("horizon") if not sc.empty else []):
         st.subheader(f"{h} napos horizont")
         a, b, c, d = st.columns(4)
         a.metric("Kiértékelt napok", len(group))
@@ -167,13 +205,20 @@ def page_track_record() -> None:
         fig.update_layout(height=320, margin=dict(t=10, b=10), legend=dict(orientation="h"))
         st.plotly_chart(fig, width="stretch")
 
+    if not pending.empty:
+        st.subheader("Kiértékelésre váró előrejelzések")
+        st.dataframe(pending.sort_values(["Várható kiértékelés", "Horizont (nap)"]),
+                     hide_index=True, width="stretch")
+        st.caption("A várható dátum munkanapokkal számolt becslés; tőzsdei ünnepnap egy nappal "
+                   "eltolhatja.")
+
 
 def page_research() -> None:
     st.title("Kutatási eredmények")
     ex = experiments()
     if ex.empty:
-        st.info("A kutatási adattár (data/research.db) ezen a gépen nem érhető el. "
-                "Sharadar-adatból épül, ezért csak helyben létezik.")
+        st.info("Nincs elérhető kutatási eredmény. Helyben a data/research.db, máshol a "
+                "`python -m src.cli export-research` által írt research/ mappa szükséges.")
         return
 
     st.caption("Kiértékelés: 2008–2026, túlélési torzítástól mentes univerzum (a legforgalmasabb "
@@ -191,6 +236,20 @@ def page_research() -> None:
                      color_discrete_map={"Baseline": "#b9c4bf", "Tanuló modell": "#0e4f52"})
         fig.update_layout(height=380, margin=dict(t=30, b=10))
         st.plotly_chart(fig, width="stretch")
+
+    portfolio = research_table("report/models.csv", "portfolio.csv")
+    if portfolio is not None:
+        st.subheader("Long-short portfólió")
+        st.caption("A felső 10% vétele, az alsó 10% shortolása, egyenlő súllyal, a horizonttal "
+                   "megegyező, nem átfedő tartással; tranzakciós költség nélkül. A Sharpe min–max "
+                   "azt mutatja, mennyit számít, melyik napon kezdjük az újrasúlyozást.")
+        view = portfolio[portfolio["variant"] == "final"].assign(Modell=lambda d: d["model"].map(label))
+        view = view[["horizon", "Modell", "ic_mean", "ls_ann_return", "ls_sharpe",
+                     "ls_sharpe_min", "ls_sharpe_max", "ls_max_drawdown"]].rename(columns={
+            "horizon": "Horizont", "ic_mean": "IC", "ls_ann_return": "Éves hozam",
+            "ls_sharpe": "Sharpe", "ls_sharpe_min": "Sharpe min", "ls_sharpe_max": "Sharpe max",
+            "ls_max_drawdown": "Max. visszaesés"})
+        st.dataframe(view.round(3), hide_index=True, width="stretch")
 
     alt = ex[ex["name"] == "final_alt"]
     if not final.empty and not alt.empty:
@@ -236,23 +295,21 @@ def page_research() -> None:
             fig.update_layout(height=300, margin=dict(t=10, b=10), title="Kumulált")
             st.plotly_chart(fig, width="stretch")
 
-    surv = RESULTS / "survivorship" / "cross_sectional_by_universe.csv"
-    if surv.exists():
+    df = research_table("survivorship/cross_sectional_by_universe.csv", "survivorship.csv")
+    if df is not None:
         st.subheader("Túlélési torzítás")
         st.caption("Ugyanaz a módszer három univerzumon. A torzított univerzumokból hiányoznak "
                    "a később kivezetett cégek.")
-        df = pd.read_csv(surv)
         df["Modell"] = df["model"].map(label)
         pivot = df.pivot_table(index=["horizon", "Modell"], columns="universe", values="ic_mean")
         pivot = pivot.rename(columns={"point_in_time": "Helyes (pontbeli)",
                                       "survivors": "Csak túlélők", "todays_list": "Mai lista"})
         st.dataframe(pivot.round(4), width="stretch")
 
-    absolute = RESULTS / "survivorship" / "absolute_direction.csv"
-    if absolute.exists():
+    df = research_table("survivorship/absolute_direction.csv", "absolute_direction.csv")
+    if df is not None:
         st.subheader("Abszolút irány")
         st.caption("Emelkedik-e az ár? A „Konstans” modell mindig emelkedést jósol.")
-        df = pd.read_csv(absolute)
         df["Modell"] = df["model"].map(label)
         view = df[["horizon", "Modell", "accuracy", "majority_baseline", "auc"]].rename(columns={
             "horizon": "Horizont", "accuracy": "Találati arány",

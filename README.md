@@ -32,7 +32,10 @@ tests/            automatikus tesztek (szintetikus adaton)
 ui/dashboard.py   Streamlit felület
 live/             éles előrejelzések, kiértékelések, univerzum
 models/           a betanított éles modellek
+research/         a kutatási eredmények összesítései (statisztikák, nyers adat nélkül)
 ```
+
+A webes felület helyben a `data/research.db` adattárból olvas; ahol az nincs (például a Streamlit Community Cloudon), ott a `research/` mappából.
 
 ## Telepítés
 
@@ -55,6 +58,7 @@ A verziók szándékosan rögzítettek: az éles modellek pickle-ként vannak me
 python scripts/sharadar_export.py           # Sharadar-pillanatkép letöltése (aktív előfizetés kell)
 python scripts/final_evaluation.py          # végső kiértékelés, eredmény a kutatási adattárba
 python -m src.cli report                    # a dolgozat táblái: results/report/
+python -m src.cli export-research           # publikálható összesítések a research/ mappába
 python -m src.cli experiments               # mi van a kutatási adattárban
 python -m src.cli train                     # éles modellek tanítása a teljes történeten
 python -m src.cli live-universe             # éles univerzum és jelöltlista a Sharadarból
