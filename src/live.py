@@ -31,8 +31,17 @@ logger = logging.getLogger(__name__)
 
 LIVE_DIR = ROOT / "live"
 UNIVERSE_FILE = LIVE_DIR / "universe.csv"
+CANDIDATES_FILE = LIVE_DIR / "candidates.csv"
 PRED_DIR = LIVE_DIR / "predictions"
 SCORECARD_FILE = LIVE_DIR / "scorecard.csv"
+
+# The research universe was re-selected every 63 trading days; live does the
+# same on a calendar schedule.
+REFRESH_CALENDAR_DAYS = 91
+UNIVERSE_SIZE = 1000
+CANDIDATE_MULTIPLE = 1.5
+MIN_PRICE = 5.0
+ADV_WINDOW = 60
 
 # Enough trading days for the slowest feature (252 days) plus warm-up, and
 # for scoring predictions up to the longest horizon after they were made.
@@ -48,8 +57,12 @@ def to_yahoo(ticker: str) -> str:
     return ticker.replace(".", "-")
 
 
-def build_universe(size: int = 1000) -> pd.DataFrame:
-    """Freeze today's liquid universe from the Sharadar snapshot."""
+def build_universe(size: int = UNIVERSE_SIZE) -> pd.DataFrame:
+    """Freeze today's liquid universe, and a wider candidate list, from Sharadar.
+
+    The candidate list is what the live run later re-ranks from free data,
+    once the subscription that produced it has ended.
+    """
     from src import universe
     from src.sources import sharadar
 
@@ -57,23 +70,61 @@ def build_universe(size: int = 1000) -> pd.DataFrame:
     last = pd.Timestamp(sharadar.load("stocks", columns=["date"])["date"].max())
     prices = sharadar.load_prices(start=str((last - pd.Timedelta(days=200)).date()),
                                   tickers=meta.index.tolist())
-    members = universe.todays_list_membership(prices, size=size).get_level_values("ticker").unique()
 
-    out = pd.DataFrame({
-        "ticker": [to_yahoo(t) for t in members],
-        "sharadar_ticker": list(members),
-        "as_of": str(last.date()),
-    }).sort_values("ticker")
     LIVE_DIR.mkdir(parents=True, exist_ok=True)
-    out.to_csv(UNIVERSE_FILE, index=False)
-    logger.info("Live universe: %d names as of %s", len(out), last.date())
-    return out
+    n_candidates = int(size * CANDIDATE_MULTIPLE)
+    for path, n in ((UNIVERSE_FILE, size), (CANDIDATES_FILE, n_candidates)):
+        members = universe.todays_list_membership(prices, size=n).get_level_values("ticker").unique()
+        pd.DataFrame({
+            "ticker": [to_yahoo(t) for t in members],
+            "sharadar_ticker": list(members),
+            "as_of": str(last.date()),
+        }).sort_values("ticker").to_csv(path, index=False)
+        logger.info("%s: %d names as of %s", path.name, len(members), last.date())
+    return pd.read_csv(UNIVERSE_FILE)
 
 
 def load_universe() -> list[str]:
     if not UNIVERSE_FILE.exists():
         raise FileNotFoundError("live/universe.csv not found. Run `python -m src.cli live-universe`.")
     return pd.read_csv(UNIVERSE_FILE)["ticker"].tolist()
+
+
+def universe_is_stale(today: pd.Timestamp | None = None) -> bool:
+    if not UNIVERSE_FILE.exists():
+        return False
+    as_of = pd.Timestamp(pd.read_csv(UNIVERSE_FILE, nrows=1)["as_of"].iloc[0])
+    return ((today or pd.Timestamp.today()) - as_of).days >= REFRESH_CALENDAR_DAYS
+
+
+def refresh_universe(size: int = UNIVERSE_SIZE) -> pd.DataFrame:
+    """Re-rank the candidate list by recent dollar volume, as the research did.
+
+    Same rule as the research universe: trailing 60-day average dollar volume,
+    price at least $5, top `size`. Only names on the candidate list can enter
+    — a stated limitation, since a company listed after the snapshot never
+    appears on it.
+    """
+    candidates = pd.read_csv(CANDIDATES_FILE)
+    start = str((pd.Timestamp.today() - pd.Timedelta(days=ADV_WINDOW * 2)).date())
+    frames = download_prices(candidates["ticker"].tolist(), start)
+
+    rows = []
+    for ticker, df in frames.items():
+        recent = df.tail(ADV_WINDOW)
+        if len(recent) >= ADV_WINDOW // 2 and recent["Close"].iloc[-1] >= MIN_PRICE:
+            rows.append((ticker, recent["DollarVolume"].mean(), recent.index[-1]))
+    ranked = pd.DataFrame(rows, columns=["ticker", "adv", "last"])
+    latest = ranked["last"].max()
+    ranked = ranked[ranked["last"] == latest].nlargest(size, "adv")
+
+    out = candidates.set_index("ticker").loc[ranked["ticker"], ["sharadar_ticker"]].reset_index()
+    out["as_of"] = str(latest.date())
+    out = out.sort_values("ticker")
+    out.to_csv(UNIVERSE_FILE, index=False)
+    logger.info("Universe refreshed from %d candidates: %d names as of %s",
+                len(candidates), len(out), latest.date())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +229,10 @@ def resolve(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 def daily() -> dict:
     """One live step: predict for the latest close, then score matured forecasts."""
+    refreshed = False
+    if universe_is_stale() and CANDIDATES_FILE.exists():
+        refresh_universe()
+        refreshed = True
     tickers = load_universe()
     start = str((pd.Timestamp.today() - pd.Timedelta(days=HISTORY_CALENDAR_DAYS)).date())
     frames = download_prices(tickers, start)
@@ -201,4 +256,5 @@ def daily() -> dict:
 
     scorecard = resolve(frames)
     return {"as_of": str(as_of.date()), "status": status, "n_predictions": n_predictions,
-            "file": str(out_path.relative_to(ROOT)), "scored_total": len(scorecard)}
+            "file": str(out_path.relative_to(ROOT)), "scored_total": len(scorecard),
+            "universe_refreshed": refreshed}
