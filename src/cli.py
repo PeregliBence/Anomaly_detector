@@ -119,7 +119,10 @@ def cmd_daily(args) -> None:
 def cmd_report(args) -> None:
     from src import report
 
-    path = report.build(names=tuple(args.names))
+    if args.render_only:
+        path = report.render(costs=args.costs)
+    else:
+        path = report.build(names=tuple(args.names), costs=args.costs)
     print(f"Report written to {path}")
 
 
@@ -161,6 +164,9 @@ def main(argv: list[str] | None = None) -> None:
 
     rp = sub.add_parser("report", help="build the thesis tables from the research store")
     rp.add_argument("--names", nargs="+", default=["final", "final_alt"])
+    rp.add_argument("--costs", action="store_true", help="add net-of-cost columns")
+    rp.add_argument("--render-only", action="store_true",
+                    help="rewrite report.md from the saved CSVs without recomputing")
 
     args = parser.parse_args(argv)
     setup_logging("INFO" if args.command in ("train", "daily", "report") else "WARNING")
