@@ -1,0 +1,30 @@
+# Runs the test suite on every push and pull request. The tests use synthetic
+# data only, so they need neither the Sharadar snapshot nor any API key.
+# Pushes made by the daily workflow's GITHUB_TOKEN do not trigger this.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-live.txt
+
+      - name: Install dependencies
+        run: |
+          pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-live.txt pytest==8.4.2
+
+      - name: Run tests
+        run: python -m pytest tests -q
