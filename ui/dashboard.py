@@ -1,6 +1,6 @@
 """Web interface: today's forecasts, the live track record, and the research.
 
-    streamlit run dashboard.py
+    streamlit run ui/dashboard.py
 
 The live pages read the committed files under live/. The research page reads
 the local research store (data/research.db), which is built from the licensed
@@ -19,7 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 PRED_DIR = ROOT / "live" / "predictions"
 SCORECARD = ROOT / "live" / "scorecard.csv"
 STORE = ROOT / "data" / "research.db"

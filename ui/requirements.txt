@@ -1,0 +1,7 @@
+# The web interface only reads files; it needs none of the modelling stack.
+# Streamlit Community Cloud installs this file because it sits next to the
+# entry point, ui/dashboard.py.
+streamlit==1.55.0
+pandas==2.3.3
+numpy==2.4.3
+plotly==6.6.0
