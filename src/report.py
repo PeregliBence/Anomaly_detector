@@ -44,6 +44,10 @@ def _portfolio_stats(preds: pd.DataFrame, horizon: int) -> dict:
         "ls_sharpe_max": offsets.max(),
         "ls_max_drawdown": s["long_short_max_drawdown"],
         "ls_hit_rate": s["long_short_hit_rate"],
+        "turnover": s.get("turnover_per_rebalance"),
+        "ls_sharpe_net_5bps": s.get("long_short_sharpe_net_5bps"),
+        "ls_sharpe_net_10bps": s.get("long_short_sharpe_net_10bps"),
+        "ls_sharpe_net_20bps": s.get("long_short_sharpe_net_20bps"),
     }
 
 
@@ -95,19 +99,32 @@ def _md_table(df: pd.DataFrame, index: bool = False) -> str:
     return "\n".join([header, rule, *body])
 
 
-def _markdown(table: pd.DataFrame, years: pd.DataFrame) -> str:
-    lines = ["# Végső kiértékelés", "",
-             "Teszt: 2008–2026, a legforgalmasabb 1000 amerikai részvény, túlélési torzítás nélkül; "
-             "purged walk-forward, éves újratanítás. A long-short portfólió a felső és alsó decilis, "
-             "egyenlő súllyal, a horizonttal megegyező, nem átfedő tartással, költségek nélkül.", ""]
+BASE_COLUMNS = {
+    "model": "Modell", "ic_mean": "IC", "ic_tstat": "t", "ic_positive_rate": "IC>0",
+    "ls_ann_return": "LS éves hozam", "ls_sharpe": "Sharpe", "ls_sharpe_min": "Sharpe min",
+    "ls_sharpe_max": "Sharpe max", "ls_max_drawdown": "Max. visszaesés",
+}
+COST_COLUMNS = {
+    "turnover": "Forgás", "ls_sharpe_net_5bps": "Sharpe 5 bp",
+    "ls_sharpe_net_10bps": "Sharpe 10 bp", "ls_sharpe_net_20bps": "Sharpe 20 bp",
+}
 
+
+def _markdown(table: pd.DataFrame, years: pd.DataFrame, costs: bool = False) -> str:
+    intro = ("Teszt: 2008–2026, a legforgalmasabb 1000 amerikai részvény, túlélési torzítás nélkül; "
+             "purged walk-forward, éves újratanítás. A long-short portfólió a felső és alsó decilis, "
+             "egyenlő súllyal, a horizonttal megegyező, nem átfedő tartással, tranzakciós költségek "
+             "nélkül (bruttó).")
+    if costs:
+        intro += (" A költségoszlopok egyirányú, arányos költséggel számolnak (bp = bázispont); "
+                  "a forgás az újrasúlyozásonként lecserélt nevek aránya lábanként.")
+    lines = ["# Végső kiértékelés", "", intro, ""]
+
+    columns = {**BASE_COLUMNS, **(COST_COLUMNS if costs else {})}
     for h, group in table.groupby("horizon"):
         lines += [f"## {h} napos horizont", ""]
         view = group.assign(Változat=group["variant"].map(VARIANTS))
-        view = view[["Változat", "model", "ic_mean", "ic_tstat", "ic_positive_rate",
-                     "ls_ann_return", "ls_sharpe", "ls_sharpe_min", "ls_sharpe_max", "ls_max_drawdown"]]
-        view.columns = ["Változat", "Modell", "IC", "t", "IC>0", "LS éves hozam", "Sharpe",
-                        "Sharpe min", "Sharpe max", "Max. visszaesés"]
+        view = view[["Változat", *columns]].rename(columns=columns)
         lines += [_md_table(view), ""]
 
     if not years.empty:
@@ -115,7 +132,11 @@ def _markdown(table: pd.DataFrame, years: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def build(names: tuple[str, ...] = ("final", "final_alt")) -> Path:
+def build(names: tuple[str, ...] = ("final", "final_alt"), costs: bool = False) -> Path:
+    """Write the tables. Gross results by default; `costs` adds the net-of-cost columns.
+
+    The CSV always carries every column, so the cost analysis needs no rerun.
+    """
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     experiments = store.experiments()
     experiments = experiments[experiments["name"].isin(names)]
@@ -132,5 +153,14 @@ def build(names: tuple[str, ...] = ("final", "final_alt")) -> Path:
         gain.dropna().to_csv(OUT_DIR / "alternative_data_gain.csv")
 
     path = OUT_DIR / "report.md"
-    path.write_text(_markdown(table, years), encoding="utf-8")
+    path.write_text(_markdown(table, years, costs=costs), encoding="utf-8")
+    return path
+
+
+def render(costs: bool = False) -> Path:
+    """Rewrite report.md from the saved CSVs, without recomputing anything."""
+    table = pd.read_csv(OUT_DIR / "models.csv")
+    years = pd.read_csv(OUT_DIR / "ensemble_ic_by_year.csv", index_col=0)
+    path = OUT_DIR / "report.md"
+    path.write_text(_markdown(table, years, costs=costs), encoding="utf-8")
     return path

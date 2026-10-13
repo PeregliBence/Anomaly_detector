@@ -10,9 +10,11 @@ work beside them, predictions are turned into that portfolio:
   its forecast horizon. Rebalancing daily on a multi-day horizon would stack
   overlapping positions whose returns share most of their days, and a Sharpe
   ratio computed on those overlapping returns is inflated;
-- returns are gross of trading costs, as the comparison papers report them.
-  Weekly turnover at the 5-day horizon would cost real money, which is
-  stated as a limitation rather than modelled.
+- returns are reported gross, as the comparison papers report them, and net
+  of a proportional trading cost. Each rebalance replaces some fraction of
+  each leg; replacing a name is one sale and one purchase, so a period costs
+  2 x one-way cost x (long-leg turnover + short-leg turnover). The first
+  period buys both legs from cash.
 """
 
 from __future__ import annotations
@@ -52,13 +54,45 @@ def long_short_returns(preds: pd.DataFrame, horizon: int, n_buckets: int = 10,
         "market": day.groupby("date")["simple"].mean(),
     })
     out["long_short"] = out["top"] - out["bottom"]
+
+    members = day.groupby(["date", "bucket"])["ticker"].agg(frozenset).unstack()
+    out["turnover_top"] = _turnover(members[n_buckets - 1])
+    out["turnover_bottom"] = _turnover(members[0])
     return out
 
 
-def summarise(returns: pd.DataFrame, horizon: int) -> dict:
-    """Annualised mean, volatility and Sharpe ratio of each leg."""
+def _turnover(holdings: pd.Series) -> pd.Series:
+    """Fraction of a leg replaced at each rebalance; 1.0 when bought from cash."""
+    values, previous = [], None
+    for current in holdings:
+        if not isinstance(current, frozenset) or not current:
+            values.append(np.nan)
+            continue
+        values.append(1.0 if previous is None else 1 - len(current & previous) / len(current))
+        previous = current
+    return pd.Series(values, index=holdings.index)
+
+
+def net_long_short(returns: pd.DataFrame, cost_bps: float) -> pd.Series:
+    """Long-short return after a proportional one-way trading cost in basis points."""
+    cost = 2 * (cost_bps / 1e4) * (returns["turnover_top"] + returns["turnover_bottom"])
+    return returns["long_short"] - cost.fillna(0)
+
+
+def summarise(returns: pd.DataFrame, horizon: int,
+              cost_levels_bps: tuple[float, ...] = (5, 10, 20)) -> dict:
+    """Annualised mean, volatility and Sharpe ratio of each leg, gross and net."""
     periods_per_year = TRADING_DAYS / horizon
     out = {"n_periods": len(returns), "years": round(len(returns) / periods_per_year, 1)}
+
+    if "turnover_top" in returns:
+        out["turnover_per_rebalance"] = float(
+            returns[["turnover_top", "turnover_bottom"]].iloc[1:].mean().mean())
+        for bps in cost_levels_bps:
+            net = net_long_short(returns, bps).dropna()
+            std = net.std() * np.sqrt(periods_per_year)
+            out[f"long_short_sharpe_net_{bps:g}bps"] = (
+                net.mean() * periods_per_year / std if std > 0 else float("nan"))
     for col in ("long_short", "top", "bottom", "market"):
         r = returns[col].dropna()
         mean, std = r.mean() * periods_per_year, r.std() * np.sqrt(periods_per_year)
