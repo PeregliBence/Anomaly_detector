@@ -41,6 +41,7 @@ def walk_forward(
     refit_every: int = REFIT_EVERY,
     train_window_days: int | None = None,
     train_stride: int = 1,
+    tuner: Callable[[pd.DataFrame, pd.Series], dict] | None = None,
 ) -> pd.DataFrame:
     """Score every date after the warm-up using only prior information.
 
@@ -52,6 +53,11 @@ def walk_forward(
     labels on neighbouring days share h-1 days of the same future, so daily
     rows are close to duplicates: thinning them costs little information and
     cuts fitting time by the same factor. Prediction still covers every date.
+
+    `tuner`, when given, picks hyperparameters at every refit from that fold's
+    training rows alone and passes them to `model_factory`. Tuning once on the
+    whole sample would choose parameters with knowledge of every test period.
+    The parameters chosen per fold are kept in the result's attrs.
 
     Returns one row per prediction, indexed by (date, ticker).
     """
@@ -65,7 +71,7 @@ def walk_forward(
     train_dates_ok = np.ones(len(X), dtype=bool)
     if train_stride > 1:
         train_dates_ok = date_level.isin(dates[::train_stride])
-    records = []
+    records, fold_params = [], []
 
     for start in range(min_train_days, len(dates), refit_every):
         # Purge: labels dated after this cutoff resolve inside the block being
@@ -92,11 +98,13 @@ def walk_forward(
             continue
 
         try:
-            model = model_factory().fit(X_train, y_train)
+            params = tuner(X_train, y_train) if tuner is not None else {}
+            model = model_factory(**params).fit(X_train, y_train)
             scores = model.predict_proba(X[block_mask])
         except Exception as e:
             logger.warning("Fold at %s failed: %s", dates[start].date(), e)
             continue
+        fold_params.append({"train_end": str(cutoff.date()), **params})
 
         block = pd.DataFrame(
             {
@@ -114,6 +122,7 @@ def walk_forward(
         return pd.DataFrame()
 
     out = pd.concat(records).sort_index()
+    out.attrs["fold_params"] = fold_params
     logger.info("Walk-forward produced %d predictions over %d folds",
                 len(out), len(records))
     return out

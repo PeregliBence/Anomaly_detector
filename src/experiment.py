@@ -119,6 +119,7 @@ def run(
     model_names: list[str],
     target_mode: str = "cross_sectional",
     tune: bool = False,
+    tune_splits: int = 3,
     **wf_kwargs,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Walk-forward every model over the panel for one horizon.
@@ -141,16 +142,17 @@ def run(
         factory = partial(model_lib.build, name)
 
         params = {"horizon": horizon} if model_lib.needs_horizon(name) else {}
+        base = partial(factory, **params)
+
+        # Tuning happens inside every fold, on that fold's training rows only.
+        tuner = None
         if tune and name in model_lib.PARAM_GRIDS:
-            params.update(tune_on_train(
-                X, y, factory, model_lib.PARAM_GRIDS[name], horizon=horizon
-            ))
-            logger.info("  tuned params: %s", params)
+            grid = model_lib.PARAM_GRIDS[name]
+            tuner = partial(tune_on_train, model_factory=base, grid=grid,
+                            horizon=horizon, n_splits=tune_splits)
 
         try:
-            preds = walk_forward(
-                X, y, fwd, partial(factory, **params), horizon=horizon, **wf_kwargs
-            )
+            preds = walk_forward(X, y, fwd, base, horizon=horizon, tuner=tuner, **wf_kwargs)
         except Exception:
             logger.exception("  %s failed", name)
             continue
