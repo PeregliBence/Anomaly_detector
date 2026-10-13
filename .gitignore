@@ -19,10 +19,13 @@ __pycache__/
 # Windows artifact from a stray shell redirect
 NUL
 
+# Data: the Sharadar snapshot is licensed to one user and must never be
+# committed; the cache and research store are derived from it or regenerable.
+data/
+
 # Generated research output
 results/
 logs/
-data/cache/
 *.db
 
 # OS
