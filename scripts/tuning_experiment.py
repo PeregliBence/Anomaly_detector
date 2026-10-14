@@ -48,6 +48,10 @@ def main() -> None:
     rows = []
     for h in (5, 20):
         for model in GRIDS:
+            # Resume an interrupted run: anything already stored is kept.
+            if store.find("tuned", model, h) is not None:
+                print(f"tuned {model} h={h}: already stored, skipping", flush=True)
+                continue
             t = time.time()
             preds, sc = experiment.run(panel, horizon=h, model_names=[model],
                                        tune=True, tune_splits=2, **PROTOCOL)
