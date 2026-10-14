@@ -140,16 +140,30 @@ def page_today() -> None:
 
     latest = files[-1]
     df = read_predictions(latest)
+    has_direction = "prob_up_h5" in df
     st.caption(
         f"Előrejelzés a {latest.stem} záróárak alapján · {len(df)} részvény. "
         "A rang azt mutatja, hogy a modell szerint a részvény a következő 5 (illetve 20) "
-        "kereskedési napban hogyan teljesít a mezőny többi tagjához képest — "
-        "1 = legjobb. Nem azt, hogy az ára emelkedik-e."
+        "kereskedési napban hogyan teljesít a mezőny többi tagjához képest (1 = legjobb). "
+        + ("Az irány és a valószínűség azt, hogy az ára emelkedik-e. Visszamenőleg az "
+           "abszolút irányban a modell nem volt jobb a „mindig felfelé” szabálynál — lásd a "
+           "Kutatási eredmények oldalt." if has_direction else "")
     )
 
-    cols = ["ticker", "rank_h5", "rank_h20", "score_h5"]
-    view = df[cols].rename(columns={"ticker": "Ticker", "rank_h5": "Rang (5 nap)",
-                                    "rank_h20": "Rang (20 nap)", "score_h5": "Pontszám (5 nap)"})
+    if has_direction:
+        a, b = st.columns(2)
+        for col, h in ((a, 5), (b, 20)):
+            if f"prob_up_h{h}" in df:
+                col.metric(f"Emelkedést jósol, {h} nap", f"{(df[f'prob_up_h{h}'] > 0.5).mean():.0%}",
+                           help="A részvények aránya, amelyekre a modell emelkedést vár.")
+
+    names = {"ticker": "Ticker", "rank_h5": "Rang (5 nap)", "rank_h20": "Rang (20 nap)",
+             "dir_h5": "Irány (5 nap)", "prob_up_h5": "P(emelkedik), 5 nap",
+             "dir_h20": "Irány (20 nap)", "prob_up_h20": "P(emelkedik), 20 nap"}
+    view = df[[c for c in names if c in df]].rename(columns=names)
+    for col in ("Irány (5 nap)", "Irány (20 nap)"):
+        if col in view:
+            view[col] = view[col].map({"up": "fel", "down": "le"})
     left, right = st.columns(2)
     with left:
         st.subheader("Legjobb 20 (5 nap)")
@@ -167,6 +181,11 @@ def page_today() -> None:
         a, b = st.columns(2)
         a.metric("Rang, 5 nap", f"{int(row['rank_h5'])} / {len(df)}")
         b.metric("Rang, 20 nap", f"{int(row['rank_h20'])} / {len(df)}")
+        if has_direction:
+            c, d = st.columns(2)
+            for col, h in ((c, 5), (d, 20)):
+                if f"prob_up_h{h}" in row:
+                    col.metric(f"Emelkedés valószínűsége, {h} nap", f"{row[f'prob_up_h{h}']:.0%}")
         if len(hist) > 1:
             fig = px.line(hist, x="date", y=["rank_h5", "rank_h20"],
                           labels={"value": "Rang (1 = legjobb)", "date": "", "variable": ""})
@@ -204,6 +223,28 @@ def page_track_record() -> None:
         fig.add_hline(y=0, line_color="#888", line_width=1)
         fig.update_layout(height=320, margin=dict(t=10, b=10), legend=dict(orientation="h"))
         st.plotly_chart(fig, width="stretch")
+
+        if "direction_accuracy" in group and group["direction_accuracy"].notna().any():
+            g = group.dropna(subset=["direction_accuracy"])
+            st.markdown(f"**Abszolút irány ({h} nap):** emelkedik-e az ár")
+            e, f, k = st.columns(3)
+            e.metric("Közvetlen modell", f"{g['direction_accuracy'].mean():.1%}",
+                     f"{(g['direction_accuracy'] - g['always_up_accuracy']).mean():+.1%} a „mindig fel”-hez")
+            if "dr_direction_accuracy" in g and g["dr_direction_accuracy"].notna().any():
+                f.metric("Alapráta + relatív rang", f"{g['dr_direction_accuracy'].mean():.1%}",
+                         f"{(g['dr_direction_accuracy'] - g['always_up_accuracy']).mean():+.1%} a „mindig fel”-hez")
+            k.metric("„Mindig fel”", f"{g['always_up_accuracy'].mean():.1%}")
+            fig = go.Figure()
+            fig.add_scatter(x=g["date"], y=g["direction_accuracy"], name="Közvetlen modell",
+                            mode="lines+markers", line=dict(color="#0e4f52"))
+            if "dr_direction_accuracy" in g:
+                fig.add_scatter(x=g["date"], y=g["dr_direction_accuracy"], name="Alapráta + rang",
+                                mode="lines+markers", line=dict(color="#6b8f71"))
+            fig.add_scatter(x=g["date"], y=g["always_up_accuracy"], name="„Mindig fel”",
+                            mode="lines+markers", line=dict(color="#c8934f", dash="dot"))
+            fig.update_layout(height=280, margin=dict(t=10, b=10), yaxis_tickformat=".0%",
+                              legend=dict(orientation="h"))
+            st.plotly_chart(fig, width="stretch")
 
     if not pending.empty:
         st.subheader("Kiértékelésre váró előrejelzések")
@@ -306,15 +347,47 @@ def page_research() -> None:
                                       "survivors": "Csak túlélők", "todays_list": "Mai lista"})
         st.dataframe(pivot.round(4), width="stretch")
 
-    df = research_table("survivorship/absolute_direction.csv", "absolute_direction.csv")
-    if df is not None:
+    final_abs = research_table("final/absolute_summary.csv", "absolute_summary.csv")
+    if final_abs is not None:
         st.subheader("Abszolút irány")
-        st.caption("Emelkedik-e az ár? A „Konstans” modell mindig emelkedést jósol.")
-        df["Modell"] = df["model"].map(label)
-        view = df[["horizon", "Modell", "accuracy", "majority_baseline", "auc"]].rename(columns={
+        st.caption("Emelkedik-e az ár a horizont végére? Ugyanaz a protokoll, mint fent, a célváltozó "
+                   "a részvény saját hozamának előjele. A mérce a „mindig felfelé” szabály. A Brier-"
+                   "pontszám a valószínűségek pontossága (kisebb a jobb); a viszonyítás az, ha "
+                   "mindenre az átlagos emelkedési arányt mondanánk.")
+        view = final_abs.assign(Modell=final_abs["model"].map(label))
+        view = view[["horizon", "Modell", "accuracy", "always_up_accuracy", "edge_vs_always_up",
+                     "auc", "brier", "brier_base_rate"]].rename(columns={
             "horizon": "Horizont", "accuracy": "Találati arány",
-            "majority_baseline": "„Mindig fel” találati aránya", "auc": "AUC"})
+            "always_up_accuracy": "„Mindig fel”", "edge_vs_always_up": "Különbség",
+            "auc": "AUC", "brier": "Brier", "brier_base_rate": "Brier (alapráta)"})
         st.dataframe(view.round(4), hide_index=True, width="stretch")
+
+        three = research_table("final/absolute_three_way.csv", "absolute_three_way.csv")
+        if three is not None:
+            st.markdown("**Három megközelítés ugyanazokon a napokon (2009-től)**")
+            st.caption("A közvetlen modell a piac egészének irányát is megpróbálja eltalálni, és ebben "
+                       "vak: a napi „fel”-arány erősen ingadozik, a piaci hívásai mégsem jobbak a "
+                       "véletlennél. Az „alapráta + relatív rang” nem időzíti a piacot: a hosszú távú "
+                       "emelkedési arányból indul, és csak a részvény relatív rangjával tolja el.")
+            names = {"always_up": "„Mindig fel”", "absolute_ensemble": "Közvetlen modell",
+                     "drift_plus_rank": "Alapráta + relatív rang"}
+            view = three.assign(Megközelítés=three["approach"].map(names))
+            view = view[["horizon", "Megközelítés", "accuracy", "edge_vs_always_up",
+                         "predicted_up_share", "daily_up_share_sd", "within_day_auc", "brier"]].rename(columns={
+                "horizon": "Horizont", "accuracy": "Találati arány", "edge_vs_always_up": "Különbség",
+                "predicted_up_share": "„Fel” jóslatok aránya", "daily_up_share_sd": "Napi „fel”-arány szórása",
+                "within_day_auc": "Napon belüli AUC", "brier": "Brier"})
+            st.dataframe(view.round(4), hide_index=True, width="stretch")
+    else:
+        df = research_table("survivorship/absolute_direction.csv", "absolute_direction.csv")
+        if df is not None:
+            st.subheader("Abszolút irány")
+            st.caption("Emelkedik-e az ár? A „Konstans” modell mindig emelkedést jósol.")
+            df["Modell"] = df["model"].map(label)
+            view = df[["horizon", "Modell", "accuracy", "majority_baseline", "auc"]].rename(columns={
+                "horizon": "Horizont", "accuracy": "Találati arány",
+                "majority_baseline": "„Mindig fel” találati aránya", "auc": "AUC"})
+            st.dataframe(view.round(4), hide_index=True, width="stretch")
 
 
 PAGES = {

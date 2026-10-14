@@ -1,6 +1,11 @@
 # Tőzsdei előrejelző
 
-Gépi tanuláson alapuló rendszer, amely a legforgalmasabb 1000 amerikai részvényre előre jelzi, hogy a következő 5, illetve 20 kereskedési napban melyik teljesít jobban a többinél. A projekt BSc szakdolgozat keretében készült (BME, mérnökinformatikus szak).
+Gépi tanuláson alapuló rendszer, amely a legforgalmasabb 1000 amerikai részvényre két dolgot jelez előre a következő 5, illetve 20 kereskedési napra:
+
+- **relatív irány:** melyik részvény teljesít jobban a többinél (rangsor);
+- **abszolút irány:** emelkedik-e a részvény ára (valószínűség és irány).
+
+Visszamenőleg a relatív irányban a modellek a publikált stratégiáknál is jobbak voltak, az abszolút irányban viszont nem verték a „mindig felfelé” szabályt. Mindkettő élesben is kiértékelődik. A projekt BSc szakdolgozat keretében készült (BME, mérnökinformatikus szak).
 
 A rendszer három részből áll:
 
