@@ -77,6 +77,26 @@ def test_resolve_scores_only_matured_forecasts(live_dirs, monkeypatch):
     assert live.resolve(frames)["horizon"].tolist() == [5]  # not scored twice
 
 
+def test_resolve_scores_absolute_direction_against_always_up(live_dirs, monkeypatch):
+    monkeypatch.setattr(live.production, "HORIZONS", (5,))
+    frames = {f"T{i}": make_prices(n_days=60, seed=i) for i in range(25)}
+    made = frames["T0"].index[40]
+    closes = pd.DataFrame({t: f["Close"] for t, f in frames.items()})
+    rose = (np.log(closes.iloc[45] / closes.iloc[40]) > 0)
+    # A perfect forecaster: probability 0.9 when the stock rose, 0.1 when it fell.
+    pd.DataFrame({"ticker": rose.index, "score_h5": rose.values.astype(float),
+                  "prob_up_h5": np.where(rose, 0.9, 0.1),
+                  "prob_up_dr_h5": 0.6}) \
+        .to_csv(live_dirs / "predictions" / f"{made.date()}.csv", index=False)
+
+    row = live.resolve(frames).iloc[0]
+    assert row["direction_accuracy"] == 1.0
+    assert row["always_up_accuracy"] == pytest.approx(rose.mean())
+    assert row["brier"] == pytest.approx(0.01)
+    # The derived forecast said "up" for everyone, so it scores exactly like always-up.
+    assert row["dr_direction_accuracy"] == pytest.approx(rose.mean())
+
+
 def test_store_round_trips_and_replaces(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_PATH", tmp_path / "test.db")
     X, y, fwd = toy_panel(n_dates=60)

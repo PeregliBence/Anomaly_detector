@@ -95,11 +95,13 @@ def cmd_import(args) -> None:
 def cmd_train(args) -> None:
     from src import production
 
-    production.train(horizons=args.horizons, start=args.start, size=args.size)
-    for h in args.horizons:
-        b = production.load(h)
-        print(f"h={h}: {list(b['members'])} trained {b['train_start']}..{b['train_end']} "
-              f"on {b['train_rows']:,} rows -> {production.bundle_path(h).name}")
+    production.train(horizons=args.horizons, start=args.start, size=args.size,
+                     targets=args.targets)
+    for target in args.targets:
+        for h in args.horizons:
+            b = production.load(h, target)
+            print(f"{target} h={h}: {list(b['members'])} trained {b['train_start']}..{b['train_end']} "
+                  f"on {b['train_rows']:,} rows -> {production.bundle_path(h, target).name}")
 
 
 def cmd_live_universe(args) -> None:
@@ -163,6 +165,8 @@ def main(argv: list[str] | None = None) -> None:
     tr.add_argument("--horizons", type=int, nargs="+", default=[5, 20])
     tr.add_argument("--start", default="2005-01-01")
     tr.add_argument("--size", type=int, default=1000)
+    tr.add_argument("--targets", nargs="+", default=["cross_sectional", "absolute"],
+                    choices=["cross_sectional", "absolute"])
 
     lu = sub.add_parser("live-universe", help="freeze today's universe from Sharadar")
     lu.add_argument("--size", type=int, default=1000)

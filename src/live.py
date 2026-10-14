@@ -14,6 +14,7 @@ survivorship bias does not arise.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -160,6 +161,16 @@ def download_prices(tickers: list[str], start: str) -> dict[str, pd.DataFrame]:
 # Predict and resolve
 # ---------------------------------------------------------------------------
 
+DERIVED_FILE = production.MODELS_DIR / "drift_plus_rank.json"
+
+
+def derived_coefficients() -> dict:
+    """Intercept and slope of the drift-plus-rank forecast, per horizon."""
+    if not DERIVED_FILE.exists():
+        return {}
+    return json.loads(DERIVED_FILE.read_text())
+
+
 def predict(frames: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> pd.DataFrame:
     """Score every universe name on `as_of` with each production horizon."""
     tickers = [t for t, df in frames.items() if as_of in df.index]
@@ -178,9 +189,38 @@ def predict(frames: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> pd.DataFram
         out[f"score_h{h}"] = s
         out[f"rank_h{h}"] = s.rank(ascending=False, method="first")
 
+        # Absolute direction, where an absolute model has been trained.
+        if production.bundle_path(h, "absolute").exists():
+            abs_bundle = production.load(h, "absolute")
+            X = panel.reindex(columns=abs_bundle["columns"]).dropna()
+            p = production.score(abs_bundle, X).droplevel("date")
+            out[f"prob_up_h{h}"] = p
+            out[f"dir_h{h}"] = pd.Series(np.where(p > 0.5, "up", "down"), index=p.index)
+
+        # Derived absolute direction: long-run share of rises shifted by the
+        # relative rank — the same forecast without any market timing.
+        coef = derived_coefficients().get(str(h))
+        if coef is not None:
+            p = 1 / (1 + np.exp(-(coef["intercept"] + coef["slope"] * (s - 0.5))))
+            out[f"prob_up_dr_h{h}"] = p
+            out[f"dir_dr_h{h}"] = pd.Series(np.where(p > 0.5, "up", "down"), index=p.index)
+
     out = out.dropna(how="all").sort_values(f"rank_h{production.HORIZONS[0]}")
     out.index.name = "ticker"
     return out
+
+
+def _direction_scores(prob_up: pd.Series, fwd: pd.Series) -> dict:
+    """How the absolute forecasts fared, next to the 'always up' rule."""
+    joined = pd.concat([prob_up.rename("p"), fwd.rename("fwd")], axis=1, join="inner").dropna()
+    rose = (joined["fwd"] > 0).astype(float)
+    return {
+        "direction_n": len(joined),
+        "direction_accuracy": float(((joined["p"] > 0.5) == (rose > 0)).mean()),
+        "always_up_accuracy": float(rose.mean()),
+        "predicted_up_share": float((joined["p"] > 0.5).mean()),
+        "brier": float(((joined["p"] - rose) ** 2).mean()),
+    }
 
 
 def resolve(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -208,7 +248,7 @@ def resolve(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
             if len(joined) < 20:
                 continue
             decile = pd.qcut(joined[col].rank(method="first"), 10, labels=False)
-            rows.append({
+            row = {
                 "date": path.stem,
                 "horizon": h,
                 "resolved_on": str(calendar[pos + h].date()),
@@ -216,7 +256,14 @@ def resolve(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 "ic": stats.spearmanr(joined[col], joined["fwd"]).statistic,
                 "top_decile_return": joined["fwd"][decile == 9].mean(),
                 "bottom_decile_return": joined["fwd"][decile == 0].mean(),
-            })
+            }
+            if f"prob_up_h{h}" in preds:
+                row.update(_direction_scores(preds[f"prob_up_h{h}"], fwd))
+            if f"prob_up_dr_h{h}" in preds:
+                derived = _direction_scores(preds[f"prob_up_dr_h{h}"], fwd)
+                row.update({f"dr_{k}": v for k, v in derived.items() if k != "always_up_accuracy"})
+                row.setdefault("always_up_accuracy", derived["always_up_accuracy"])
+            rows.append(row)
 
     if rows:
         new = pd.DataFrame(rows)
