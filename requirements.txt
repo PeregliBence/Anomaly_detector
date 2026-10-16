@@ -20,5 +20,8 @@ torch==2.11.0
 streamlit==1.55.0
 plotly==6.6.0
 
+# Research figures
+matplotlib==3.10.7
+
 # Tests
 pytest==8.4.2

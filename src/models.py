@@ -155,6 +155,22 @@ class LightGBM(Model):
         self.clf_ = lgb.LGBMClassifier(**self.params).fit(X.values, y.values)
         return self
 
+    def fit_with_curve(self, X, y, X_val, y_val, X_probe, y_probe):
+        """Fit while recording log loss and AUC after every tree.
+
+        Used for learning-curve diagnostics only. `X_probe` is a training
+        subsample, so the training curve is measured like the validation one.
+        """
+        self.clf_ = lgb.LGBMClassifier(**self.params).fit(
+            X.values, y.values,
+            eval_set=[(X_probe.values, y_probe.values), (X_val.values, y_val.values)],
+            eval_names=["train", "valid"], eval_metric=["binary_logloss", "auc"],
+        )
+        result = self.clf_.evals_result_
+        self.history_ = {split: {"logloss": result[split]["binary_logloss"], "auc": result[split]["auc"]}
+                         for split in ("train", "valid")}
+        return self
+
     def predict_proba(self, X):
         return self.clf_.predict_proba(X.values)[:, 1]
 
@@ -179,6 +195,19 @@ class XGBoost(Model):
         if not HAS_XGBOOST:
             raise ImportError("xgboost is not installed")
         self.clf_ = xgb.XGBClassifier(**self.params).fit(X.values, y.values)
+        return self
+
+    def fit_with_curve(self, X, y, X_val, y_val, X_probe, y_probe):
+        """Fit while recording log loss and AUC after every tree (diagnostics only)."""
+        params = {**self.params, "eval_metric": ["logloss", "auc"]}
+        self.clf_ = xgb.XGBClassifier(**params).fit(
+            X.values, y.values,
+            eval_set=[(X_probe.values, y_probe.values), (X_val.values, y_val.values)],
+            verbose=False,
+        )
+        result = self.clf_.evals_result()
+        self.history_ = {name: {"logloss": result[key]["logloss"], "auc": result[key]["auc"]}
+                         for name, key in (("train", "validation_0"), ("valid", "validation_1"))}
         return self
 
     def predict_proba(self, X):

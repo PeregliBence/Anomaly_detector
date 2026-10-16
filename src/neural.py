@@ -130,14 +130,21 @@ class _TorchClassifier(Model):
         val_idx = torch.tensor(np.flatnonzero(val_mask), device=device)
         loss_fn = torch.nn.BCEWithLogitsLoss()
 
-        self.nets_ = []
+        # Training loss is measured on a fixed subsample in eval mode, so it is
+        # comparable with the validation loss (no dropout, same batch norm).
+        rng = np.random.default_rng(0)
+        probe = np.sort(rng.choice(len(train_idx), min(len(train_idx), 100_000), replace=False))
+        probe_idx = train_idx[torch.tensor(probe, device=device)]
+
+        self.nets_, self.history_ = [], []
         for seed in range(self.seeds):
             torch.manual_seed(seed)
             net = self._network().to(device)
             opt = torch.optim.Adam(net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-            best_loss, best_state, stale = np.inf, None, 0
-            for _ in range(self.epochs):
+            best_loss, best_state, stale, best_epoch = np.inf, None, 0, 0
+            curve = {"seed": seed, "train_loss": [], "val_loss": [], "val_auc": []}
+            for epoch in range(1, self.epochs + 1):
                 net.train()
                 order = train_idx[torch.randperm(len(train_idx), device=device)]
                 for start in range(0, len(order), self.batch_size):
@@ -147,9 +154,14 @@ class _TorchClassifier(Model):
                     loss_fn(logits, target[idx]).backward()
                     opt.step()
 
-                val_loss = self._loss(net, tensors, target, val_idx, loss_fn)
+                train_loss, _ = self._evaluate(net, tensors, target, probe_idx, loss_fn)
+                val_loss, val_auc = self._evaluate(net, tensors, target, val_idx, loss_fn)
+                curve["train_loss"].append(train_loss)
+                curve["val_loss"].append(val_loss)
+                curve["val_auc"].append(val_auc)
+
                 if val_loss < best_loss - 1e-5:
-                    best_loss, stale = val_loss, 0
+                    best_loss, stale, best_epoch = val_loss, 0, epoch
                     best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
                 else:
                     stale += 1
@@ -160,18 +172,27 @@ class _TorchClassifier(Model):
                 net.load_state_dict(best_state)
             net.eval()
             self.nets_.append(net)
+            curve["best_epoch"] = best_epoch
+            self.history_.append(curve)
         return self
 
-    def _loss(self, net, tensors, target, idx, loss_fn) -> float:
+    def _evaluate(self, net, tensors, target, idx, loss_fn) -> tuple[float, float]:
+        """Mean log loss and AUC over `idx`, in eval mode."""
+        from sklearn.metrics import roc_auc_score
+
         torch = _torch()
         net.eval()
-        total, n = 0.0, 0
+        total, n, probs = 0.0, 0, []
         with torch.no_grad():
             for start in range(0, len(idx), self.batch_size * 4):
                 b = idx[start:start + self.batch_size * 4]
-                total += loss_fn(self._forward(net, self._batches(tensors, b)), target[b]).item() * len(b)
+                logits = self._forward(net, self._batches(tensors, b))
+                total += loss_fn(logits, target[b]).item() * len(b)
                 n += len(b)
-        return total / max(n, 1)
+                probs.append(torch.sigmoid(logits).cpu().numpy())
+        y = target[idx].cpu().numpy()
+        auc = roc_auc_score(y, np.concatenate(probs)) if len(np.unique(y)) == 2 else float("nan")
+        return total / max(n, 1), float(auc)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         torch = _torch()

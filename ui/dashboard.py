@@ -389,6 +389,49 @@ def page_research() -> None:
                 "majority_baseline": "„Mindig fel” találati aránya", "auc": "AUC"})
             st.dataframe(view.round(4), hide_index=True, width="stretch")
 
+    learning_curves()
+
+
+def learning_curves() -> None:
+    path = next((p for p in (RESULTS / "learning_curves" / "curves.parquet",
+                             RESEARCH / "learning_curves.parquet") if p.exists()), None)
+    if path is None:
+        return
+    curves = pd.read_parquet(path)
+    st.subheader("Tanulási görbék")
+    st.caption("A tanító adaton és egy elkülönített (purge-olt) validációs szeleten mért log-veszteség, "
+               "ugyanazokkal a beállításokkal, mint a walk-forwardban. A szaggatott vonal az, ha "
+               "mindenkire az átlagos arányt mondanánk: ami alatta van, az tanult valamit. A fáknál "
+               "fánként, a neurális hálóknál epochonként (magonként), a logisztikus regressziónál a "
+               "regularizáció erőssége (C) szerint.")
+    c1, c2 = st.columns(2)
+    models_ = [m for m in ("lightgbm", "xgboost", "mlp", "lstm", "logistic") if m in set(curves["model"])]
+    model = c1.selectbox("Modell", models_, format_func=label, key="lc_model")
+    metric = c2.radio("Mérőszám", ["logloss", "auc"], horizontal=True, key="lc_metric",
+                      format_func={"logloss": "Log-veszteség", "auc": "AUC"}.get)
+
+    d = curves[(curves["model"] == model) & (curves["metric"] == metric)].copy()
+    if d.empty:
+        st.info("Ehhez a modellhez nincs ilyen görbe.")
+        return
+    d["Szelet"] = d["split"].map({"train": "Tanító", "valid": "Validációs"})
+    d["Ablak"] = "tanítás " + d["fold_end"].str[:4] + "-ig"
+    d["sorozat"] = d["Szelet"] + " " + d["seed"].astype(str)
+    fig = px.line(d.sort_values("step"), x="step", y="value", color="Szelet", line_group="sorozat",
+                  facet_row="horizon", facet_col="Ablak", log_x=model == "logistic",
+                  labels={"step": d["step_name"].iloc[0], "value": ""},
+                  category_orders={"Ablak": sorted(d["Ablak"].unique())})
+    if metric == "logloss":
+        ref = curves[curves["model"] == "reference"]
+        windows = sorted(d["Ablak"].unique())
+        for _, r in ref.iterrows():
+            col = windows.index(f"tanítás {r['fold_end'][:4]}-ig") + 1
+            row = sorted(d["horizon"].unique(), reverse=True).index(r["horizon"]) + 1
+            fig.add_hline(y=r["value"], line_dash="dash", line_color="grey", row=row, col=col)
+    fig.update_yaxes(matches=None, showticklabels=True)
+    fig.update_layout(height=520, margin=dict(t=30, b=10))
+    st.plotly_chart(fig, width="stretch")
+
 
 PAGES = {
     "Mai előrejelzések": page_today,

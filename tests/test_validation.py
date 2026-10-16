@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from conftest import toy_panel
 from src.validation import walk_forward
@@ -76,3 +77,17 @@ def test_tuner_sees_only_the_folds_training_rows():
         assert latest < min(spy.scored_dates)
     assert [s.params["chosen"] for s in Spy.instances] == list(range(1, len(seen) + 1))
     assert len(preds.attrs["fold_params"]) == len(seen)
+
+
+def test_tree_learning_curves_have_one_point_per_tree():
+    pytest.importorskip("lightgbm")
+    from src import models
+    from src.neural import _time_split
+
+    X, y, _ = toy_panel(n_dates=120, n_names=30)
+    tr, va = _time_split(X, 0.1, gap=5)
+    for name in ("lightgbm", "xgboost"):
+        m = models.build(name, n_estimators=25).fit_with_curve(X[tr], y[tr], X[va], y[va], X[tr], y[tr])
+        for split in ("train", "valid"):
+            assert len(m.history_[split]["logloss"]) == 25
+            assert len(m.history_[split]["auc"]) == 25
