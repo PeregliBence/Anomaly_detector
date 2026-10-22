@@ -16,8 +16,10 @@ predictors in the literature (the Baa-Aaa default spread of Fama and French,
 
 from __future__ import annotations
 
+import io
 import logging
 import os
+import time
 
 import pandas as pd
 import requests
@@ -27,6 +29,8 @@ from src import cache
 logger = logging.getLogger(__name__)
 
 API = "https://api.stlouisfed.org/fred/series/observations"
+GRAPH_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+ATTEMPTS = 3
 
 CREDIT_SERIES = {
     "baa10y": "BAA10Y",   # Moody's Baa yield minus 10-year Treasury
@@ -44,6 +48,27 @@ def load_series(series_id: str, start: str, use_cache: bool = True) -> pd.Series
         if cached is not None and not cached.empty and cached.index.min() <= pd.Timestamp(start):
             return cached["value"].loc[start:]
 
+    series = None
+    for attempt in range(1, ATTEMPTS + 1):
+        try:
+            series = _from_api(series_id, start)
+            break
+        except Exception as e:
+            logger.info("FRED API attempt %d for %s failed: %s", attempt, series_id, e)
+            time.sleep(2 * attempt)
+    if series is None:
+        # The API has outages of its own; the public graph export serves the
+        # same observations without a key.
+        series = _from_graph_csv(series_id, start)
+
+    series = series.dropna().rename(series_id)
+    series.index.name = "date"
+    if use_cache and not series.empty:
+        cache.write(key, series.to_frame("value"))
+    return series
+
+
+def _from_api(series_id: str, start: str) -> pd.Series:
     api_key = os.environ.get("FRED_API_KEY", "")
     if not api_key:
         raise RuntimeError("FRED_API_KEY is not set. Add it to .env at the project root.")
@@ -57,17 +82,19 @@ def load_series(series_id: str, start: str, use_cache: bool = True) -> pd.Series
     obs = pd.DataFrame(resp.json().get("observations", []))
     if obs.empty:
         return pd.Series(dtype=float)
-
-    series = pd.Series(
+    return pd.Series(
         pd.to_numeric(obs["value"], errors="coerce").values,  # FRED marks gaps with "."
         index=pd.to_datetime(obs["date"]),
-        name=series_id,
-    ).dropna()
-    series.index.name = "date"
+    )
 
-    if use_cache:
-        cache.write(key, series.to_frame("value"))
-    return series
+
+def _from_graph_csv(series_id: str, start: str) -> pd.Series:
+    resp = requests.get(GRAPH_CSV, params={"id": series_id, "cosd": start}, timeout=60)
+    resp.raise_for_status()
+    df = pd.read_csv(io.StringIO(resp.text))
+    # First column is the date (its header has changed over time), second the value.
+    return pd.Series(pd.to_numeric(df.iloc[:, 1], errors="coerce").values,
+                     index=pd.to_datetime(df.iloc[:, 0]))
 
 
 def load_credit_state(start: str) -> pd.DataFrame:

@@ -171,6 +171,19 @@ def derived_coefficients() -> dict:
     return json.loads(DERIVED_FILE.read_text())
 
 
+def _complete_rows(panel: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """The rows with every input the model was trained on.
+
+    A column missing for every name — a market series whose source failed —
+    is an outage, not something to score around, so it stops the run.
+    """
+    X = panel.reindex(columns=columns)
+    empty = [c for c in columns if X[c].isna().all()]
+    if empty:
+        raise RuntimeError(f"No data today for model inputs {empty}; not predicting.")
+    return X.dropna()
+
+
 def predict(frames: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> pd.DataFrame:
     """Score every universe name on `as_of` with each production horizon."""
     tickers = [t for t, df in frames.items() if as_of in df.index]
@@ -184,7 +197,7 @@ def predict(frames: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> pd.DataFram
     out = pd.DataFrame(index=panel.index.get_level_values("ticker"))
     for h in production.HORIZONS:
         bundle = production.load(h)
-        X = panel.reindex(columns=bundle["columns"]).dropna()
+        X = _complete_rows(panel, bundle["columns"])
         s = production.score(bundle, X).droplevel("date")
         out[f"score_h{h}"] = s
         out[f"rank_h{h}"] = s.rank(ascending=False, method="first")
@@ -192,7 +205,7 @@ def predict(frames: dict[str, pd.DataFrame], as_of: pd.Timestamp) -> pd.DataFram
         # Absolute direction, where an absolute model has been trained.
         if production.bundle_path(h, "absolute").exists():
             abs_bundle = production.load(h, "absolute")
-            X = panel.reindex(columns=abs_bundle["columns"]).dropna()
+            X = _complete_rows(panel, abs_bundle["columns"])
             p = production.score(abs_bundle, X).droplevel("date")
             out[f"prob_up_h{h}"] = p
             out[f"dir_h{h}"] = pd.Series(np.where(p > 0.5, "up", "down"), index=p.index)
@@ -275,7 +288,7 @@ def resolve(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def daily() -> dict:
-    """One live step: predict for the latest close, then score matured forecasts."""
+    """One live step: score matured forecasts, then predict for the latest close."""
     refreshed = False
     if universe_is_stale() and CANDIDATES_FILE.exists():
         refresh_universe()
@@ -291,6 +304,9 @@ def daily() -> dict:
     PRED_DIR.mkdir(parents=True, exist_ok=True)
     out_path = PRED_DIR / f"{as_of.date()}.csv"
 
+    # Scored first, so a failed prediction does not cost the day's evaluation.
+    scorecard = resolve(frames)
+
     # Never rewrite a committed forecast. On a market holiday the latest close
     # is a day already predicted; regenerating it from revised vendor data
     # would alter a forecast after the fact and void the timestamp guarantee.
@@ -301,7 +317,6 @@ def daily() -> dict:
         preds.round(6).to_csv(out_path)
         n_predictions, status = len(preds), "new"
 
-    scorecard = resolve(frames)
     return {"as_of": str(as_of.date()), "status": status, "n_predictions": n_predictions,
             "file": str(out_path.relative_to(ROOT)), "scored_total": len(scorecard),
             "universe_refreshed": refreshed}

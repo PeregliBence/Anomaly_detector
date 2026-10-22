@@ -121,3 +121,29 @@ def test_neural_models_survive_pickling_without_their_network_class():
     model = MLP(horizon=5, seeds=1, epochs=2).fit(X, y)
     restored = pickle.loads(pickle.dumps(model))
     np.testing.assert_allclose(restored.predict_proba(X), model.predict_proba(X), rtol=1e-5)
+
+
+def test_fred_falls_back_to_the_graph_export_when_the_api_fails(monkeypatch):
+    from src.sources import fred
+
+    class Response:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("Expecting value")  # what the API outage returned
+
+    monkeypatch.setattr(fred.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fred.requests, "get", lambda url, **kw: Response(
+        "observation_date,BAA10Y\n2026-10-19,1.45\n2026-10-20,.\n"))
+    s = fred.load_series("BAA10Y", "2026-10-01", use_cache=False)
+    assert s.to_dict() == {pd.Timestamp("2026-10-19"): 1.45}
+
+
+def test_a_missing_market_input_stops_the_prediction():
+    panel = pd.DataFrame({"a": [1.0, 2.0], "baa10y": [np.nan, np.nan]})
+    with pytest.raises(RuntimeError, match="baa10y"):
+        live._complete_rows(panel, ["a", "baa10y"])
