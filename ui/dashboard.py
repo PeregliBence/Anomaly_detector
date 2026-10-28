@@ -48,6 +48,11 @@ MODEL, COMPARE, THIRD = "#2a78d6", "#eb6834", "#1baf7a"
 BASELINE = "#b5b3aa"
 INK, INK_2, MUTED, GRID, AXIS = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7"
 BAND = "rgba(42,120,214,0.10)"
+MARKET_TAKEAWAY = (
+    "A 24 piaci oszlop (amelyek egy napon belül minden részvénynél azonosak, így együtt azonosítják "
+    "a napot) elhagyásával a tanító veszteség javulása nagyjából a felére csökken, a validációs "
+    "legjobb érték viszont gyakorlatilag ugyanaz. A túltanulás kb. fele tehát az egyes napok "
+    "bemagolásából jön, és a piaci jellemzők hasznát a validációs veszteség nem mutatja.")
 TABLE_15 = 16 * 35 + 3  # header plus 15 rows, no inner scrolling
 
 pio.templates["thesis"] = go.layout.Template(layout=dict(
@@ -673,51 +678,122 @@ def tab_robustness() -> None:
                            {"Ár- és piaci jellemzők": MODEL, "+ alternatív adat": COMPARE}), 340)
 
 
+STEP_LABELS = {"tree": "Fák száma", "epoch": "Epoch", "C": "C (regularizáció)"}
+NO_MARKET = "_no_market"
+
+
+def used_step(model: str, valid: pd.Series) -> float:
+    """The setting the walk-forward actually uses."""
+    if model == "logistic":
+        return 0.01
+    if model in ("mlp", "lstm"):
+        return valid.idxmin()  # early stopping keeps the best epoch
+    return valid.index.max()   # the trees always grow all of them
+
+
 def tab_learning_curves() -> None:
     curves = research_table("learning_curves/curves.parquet", "learning_curves.parquet")
     if curves is None:
         st.info("Nincsenek tanulási görbék (scripts/learning_curves.py).")
         return
-    takeaway("A tanító veszteség folyamatosan csökken, a validációs a pénzfeldobás szintjén "
-             "(ln 2 ≈ 0,693) marad, és egy korai minimum után lassan emelkedik: a modellek enyhén "
-             "túltanulnak, a jel kicsi.")
-    c1, c2 = st.columns([2, 1])
+    takeaway("Három évben újratanítva (2012-ig, 2018-ig és 2025-ig) a modell egy félretett, későbbi "
+             "időszakon mérve alig jobb a pénzfeldobásnál, és a javulás egy korai csúcs után lassan "
+             "elfogy: enyhe túltanulás, nagyon kicsi jellel.")
+    with st.expander("Hogyan készültek a görbék?"):
+        st.markdown(
+            "- A walk-forward minden évben új modellt tanít az addigi adaton. Ebből három évet "
+            "választottunk: a 2012-ig, 2018-ig és 2025-ig tanított modellt.\n"
+            "- Mindegyiket ugyanazokkal a beállításokkal tanítottuk újra, de a tanítóablak utolsó "
+            "~10%-át (kb. az utolsó évet) félretettük validációnak, egy rés kihagyásával, hogy az "
+            "átfedő címkék ne szivárogjanak át.\n"
+            "- A célváltozó naponta kiegyensúlyozott (a részvények fele veri a mediánt), ezért a "
+            "pénzfeldobás log-vesztesége ln 2 ≈ 0,693. A „javulás” ehhez képest mért különbség, "
+            "ezredben: 1 ezred = 0,001 log-veszteség.")
+
     models_ = [m for m in ("lightgbm", "xgboost", "mlp", "lstm", "logistic") if m in set(curves["model"])]
+    c1, c2 = st.columns([3, 2])
     model = c1.segmented_control("Modell", models_, default=models_[0], format_func=label,
                                  key="lc_model", label_visibility="collapsed") or models_[0]
-    metric = c2.segmented_control("Mérőszám", ["logloss", "auc"], default="logloss", key="lc_metric",
-                                  format_func={"logloss": "Log-veszteség", "auc": "AUC"}.get,
-                                  label_visibility="collapsed") or "logloss"
+    view = c2.segmented_control("Nézet", ["gain", "both", "auc"], default="gain", key="lc_view",
+                                label_visibility="collapsed",
+                                format_func={"gain": "Javulás", "both": "Tanító és validációs",
+                                             "auc": "AUC"}.get) or "gain"
     h = horizon_picker("lc_h")
 
-    d = curves[(curves["model"] == model) & (curves["metric"] == metric) & (curves["horizon"] == h)]
-    if d.empty:
-        st.info("Ehhez a modellhez nincs ilyen görbe.")
-        return
+    sel = curves[(curves["model"] == model) & (curves["horizon"] == h)]
     ref = curves[(curves["model"] == "reference") & (curves["horizon"] == h)].set_index("fold_end")["value"]
-    folds = sorted(d["fold_end"].unique())
-    cols = st.columns(len(folds))
-    for col, fold in zip(cols, folds):
+    folds = sorted(sel["fold_end"].unique())
+    step_name = STEP_LABELS.get(sel["step_name"].iloc[0], sel["step_name"].iloc[0])
+    for col, fold in zip(st.columns(len(folds)), folds):
+        f = sel[sel["fold_end"] == fold]
         fig = go.Figure()
-        for (split, seed), g in d[d["fold_end"] == fold].groupby(["split", "seed"]):
-            name = "Tanító" if split == "train" else "Validációs"
-            fig.add_scatter(x=g["step"], y=g["value"], mode="lines", name=name, legendgroup=name,
-                            showlegend=bool(seed == 0 and fold == folds[0]),
-                            line=dict(color=MODEL if split == "train" else COMPARE, width=2),
-                            hovertemplate="%{x}: %{y:.4f}<extra>" + name + "</extra>")
-        if metric == "logloss" and fold in ref:
-            fig.add_hline(y=ref[fold], line_color=MUTED, line_width=1, line_dash="dot")
+        if view == "gain":
+            for seed, g in f[(f["metric"] == "logloss") & (f["split"] == "valid")].groupby("seed"):
+                v = g.set_index("step")["value"]
+                gain = (ref[fold] - v) * 1000
+                fig.add_scatter(x=gain.index, y=gain.values, mode="lines", showlegend=False,
+                                line=dict(color=COMPARE, width=2),
+                                hovertemplate="%{x}: %{y:.2f} ezred<extra></extra>")
+                best = gain.idxmax()
+                fig.add_scatter(x=[best], y=[gain[best]], mode="markers", showlegend=False,
+                                marker=dict(size=9, color=COMPARE, line=dict(color="white", width=2)),
+                                hovertemplate="legjobb: %{x}<br>%{y:.2f} ezred<extra></extra>")
+                if seed == 0:
+                    fig.add_vline(x=used_step(model, v), line_color=MUTED, line_width=1, line_dash="dot")
+            fig.add_hline(y=0, line_color=AXIS, line_width=1)
+            ytitle = "Javulás a pénzfeldobáshoz (ezred)"
+        else:
+            metric = "logloss" if view == "both" else "auc"
+            for (split, seed), g in f[f["metric"] == metric].groupby(["split", "seed"]):
+                name = "Tanító" if split == "train" else "Validációs"
+                fig.add_scatter(x=g["step"], y=g["value"], mode="lines", name=name, legendgroup=name,
+                                showlegend=bool(seed == 0 and fold == folds[0]),
+                                line=dict(color=MODEL if split == "train" else COMPARE, width=2),
+                                hovertemplate="%{x}: %{y:.4f}<extra>" + name + "</extra>")
+            if metric == "logloss" and fold in ref:
+                fig.add_hline(y=ref[fold], line_color=MUTED, line_width=1, line_dash="dot")
+            if metric == "auc":
+                fig.add_hline(y=0.5, line_color=MUTED, line_width=1, line_dash="dot")
+            ytitle = "Log-veszteség" if metric == "logloss" else "AUC"
         fig.update_layout(title=dict(text=f"Tanítás {fold[:4]}-ig", font=dict(size=13, color=INK)),
-                          xaxis_title={"tree": "Fák száma", "epoch": "Epoch", "C": "C (regularizáció)"}.get(
-                              d["step_name"].iloc[0], d["step_name"].iloc[0]),
+                          xaxis_title=step_name, yaxis_title=ytitle if fold == folds[0] else None,
                           xaxis_type="log" if model == "logistic" else None,
                           margin=dict(l=10, r=10, t=60, b=10))
         with col:
             chart(fig, 300)
-    st.caption("Kék: tanító adat; narancs: elkülönített, purge-olt validációs szelet. A pontozott vonal "
-               "az, ha mindenkire az átlagos arányt mondanánk: ami alatta van, az tanult valamit. A fáknál "
-               "fánként, a neurális hálóknál epochonként (több véletlen inicializálással), a logisztikus "
-               "regressziónál a regularizáció erőssége szerint.")
+    if view == "gain":
+        st.caption("Narancs: a validációs időszakon mért javulás a pénzfeldobáshoz képest (0 felett "
+                   "tanult valamit); a pont a legjobb érték, a pontozott függőleges vonal a ténylegesen "
+                   "használt beállítás. A neurális hálóknál minden vonal egy véletlen inicializálás.")
+    else:
+        st.caption("Kék: tanító adat; narancs: a félretett validációs időszak. A pontozott vízszintes "
+                   "vonal a pénzfeldobás szintje.")
+
+    if model + NO_MARKET in set(curves["model"]):
+        market_ablation(curves, model, h, folds, step_name)
+
+
+def market_ablation(curves: pd.DataFrame, model: str, h: int, folds: list[str], step_name: str) -> None:
+    st.subheader("Piaci jellemzők nélkül")
+    takeaway(MARKET_TAKEAWAY)
+    sel = curves[curves["model"].isin([model, model + NO_MARKET]) & (curves["horizon"] == h)
+                 & (curves["metric"] == "logloss")]
+    for col, fold in zip(st.columns(len(folds)), folds):
+        fig = go.Figure()
+        for (variant, split), g in sel[sel["fold_end"] == fold].groupby(["model", "split"]):
+            without = variant.endswith(NO_MARKET)
+            name = ("Tanító" if split == "train" else "Validációs") + (" – piaci nélkül" if without else "")
+            fig.add_scatter(x=g["step"], y=g["value"], mode="lines", name=name, showlegend=False,
+                            line=dict(color=MODEL if split == "train" else COMPARE, width=2,
+                                      dash="dot" if without else "solid"),
+                            hovertemplate="%{x}: %{y:.4f}<extra>" + name + "</extra>")
+        fig.update_layout(title=dict(text=f"Tanítás {fold[:4]}-ig", font=dict(size=13, color=INK)),
+                          xaxis_title=step_name, yaxis_title="Log-veszteség" if fold == folds[0] else None,
+                          margin=dict(l=10, r=10, t=60, b=10))
+        with col:
+            chart(fig, 320)
+    st.caption("Kék: tanító, narancs: validációs log-veszteség. Folytonos: minden jellemzővel; pontozott: "
+               "a piaci állapotot leíró oszlopok nélkül.")
 
 
 pages = [
